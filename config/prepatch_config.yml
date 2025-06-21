@@ -1,0 +1,113 @@
+# Pre-Patch Workflow Configuration
+# This file defines the configuration for the complete 4-phase pre-patch workflow
+
+# Workflow Configuration
+workflow:
+  name: "CMS Pre-Patch Workflow"
+  version: "1.0"
+  description: "Complete 4-phase pre-patch workflow for CMS instances"
+
+# Landing Zones to Process
+landing_zones:
+  # You can specify individual landing zones
+  - name: "lz250nonprod"
+    enabled: true
+    priority: 1
+  
+  - name: "cmsnonprod"
+    enabled: true
+    priority: 2
+  
+  - name: "fotoolspreprod"
+    enabled: true
+    priority: 3
+  
+  - name: "cmspreprod"
+    enabled: true
+    priority: 4
+  
+  - name: "lz250prod"
+    enabled: true
+    priority: 5
+  
+  - name: "fotoolsprod"
+    enabled: true
+    priority: 6
+  
+  - name: "cmsprod"
+    enabled: true
+    priority: 7
+
+# Or use 'all' to process all landing zones
+# landing_zones: "all"
+
+# Phase Configuration
+phases:
+  scanner:
+    enabled: true
+    platform_filter: null  # Options: 'windows', 'linux', or null for all
+    include_ssm: true
+    export_csv: true
+  
+  ami_backup:
+    enabled: true
+    timeout: 1800  # seconds (30 minutes)
+    wait_for_completion: true
+    retention_days: 7
+    description_prefix: "PrePatch-Backup"
+  
+  start_servers:
+    enabled: true
+    wait_for_running: true
+    timeout: 300  # seconds (5 minutes)
+  
+  validation:
+    enabled: true
+    check_ssm_status: true
+    check_instance_state: true
+    required_state: "running"
+
+# AWS Configuration
+aws:
+  role_name: "CMS-CrossAccount-Role"
+  default_region: "ap-southeast-2"
+  
+# Reporting Configuration
+reporting:
+  output_directory: "reports"
+  csv_filename_format: "patch_status_{timestamp}.csv"
+  json_filename_format: "ami_backup_report_{timestamp}.json"
+  timestamp_format: "%Y%m%d"
+  
+# Logging Configuration
+logging:
+  level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+  console_output: true
+  file_output: true
+  log_file: "logs/prepatch_workflow.log"
+
+# Safety Configuration
+safety:
+  max_instances_per_batch: 50
+  confirmation_required: false
+  dry_run: false
+  
+# Environment-specific settings
+environments:
+  nonprod:
+    ami_retention_days: 3
+    parallel_processing: true
+    max_concurrent_backups: 5
+  
+  preprod:
+    ami_retention_days: 7
+    parallel_processing: false
+    max_concurrent_backups: 2
+    confirmation_required: true
+  
+  prod:
+    ami_retention_days: 14
+    parallel_processing: false
+    max_concurrent_backups: 1
+    confirmation_required: true
+    dry_run: false  # Set to true for testing

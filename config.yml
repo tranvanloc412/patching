@@ -1,0 +1,30 @@
+# Simple Pre-Patch Workflow Configuration Example
+# Store this file in the project root directory
+
+# Landing zones to process (choose one approach):
+
+# Option 1: Process specific landing zones
+landing_zones:
+  - "lz250nonprod"
+  - "cmsnonprod"
+  - "fotoolspreprod"
+
+# Option 2: Process all landing zones (uncomment to use)
+# landing_zones: "all"
+
+# Basic workflow settings
+workflow:
+  platform: null        # Options: 'windows', 'linux', or null for all
+  skip_backup: false     # Set to true to skip AMI backup phase
+  skip_validation: false # Set to true to skip validation phase
+  ami_timeout: 1800      # AMI creation timeout in seconds
+
+# AWS settings
+aws:
+  role_name: "CMS-CrossAccount-Role"
+  region: "ap-southeast-2"
+
+# Output settings
+output:
+  reports_dir: "reports"
+  verbose: false

@@ -1,0 +1,10 @@
+# inventory/landing_zones_nonprod.yml
+
+landing_zones:
+  - name: cmsnonprod
+    account_id: 954976297051
+    patch_enabled: true
+
+  - name: lz250nonprod
+    account_id: 210987654321
+    patch_enabled: true
