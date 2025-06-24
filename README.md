@@ -1,19 +1,18 @@
 # AWS EC2 Patching Automation Tool
 
-A comprehensive Python-based automation tool for managing AWS EC2 instance patching workflows across multiple landing zones and environments. This tool has been completely refactored with a clean architecture, async support, and improved maintainability.
+A streamlined Python-based automation tool for managing AWS EC2 instance patching workflows across multiple landing zones. This tool features a simplified architecture focused on core functionality with async support and improved maintainability.
 
 ## 🚀 Features
 
-- **Clean Architecture**: Modular design with clear separation of concerns
+- **Simplified Architecture**: Clean, modular design with reduced complexity
 - **Async/Await Support**: High-performance asynchronous operations
-- **Multi-Environment Support**: Handles `nonprod` and `prod` environments
-- **Automated AMI Backup**: Creates AMI backups before patching with configurable retention
-- **Landing Zone Integration**: Supports multiple AWS landing zones with YAML-based configuration
-- **Comprehensive Reporting**: Generates detailed reports in CSV, JSON, HTML, and XML formats
-- **Flexible Workflow**: Supports both full orchestrated runs and individual phase execution
-- **Safety First**: Built-in pre-checks and validation before any patching operations
+- **Multi-Landing Zone Support**: Handles multiple AWS landing zones with YAML configuration
+- **Automated AMI Backup**: Creates AMI backups before patching operations
+- **CSV Reporting**: Generates detailed CSV reports for workflow tracking
+- **3-Phase Workflow**: Streamlined Scanner → AMI Backup → Server Manager workflow
+- **Safety First**: Built-in validation and error handling
 - **Type Safety**: Full type hints and validation throughout
-- **Configuration Driven**: YAML-based configuration with environment overrides
+- **Configuration Driven**: Simple YAML-based configuration management
 
 ## 🏗️ Architecture Overview
 
@@ -27,20 +26,16 @@ patching/
 │   └── services/              # Service implementations
 ├── infrastructure/             # External dependencies
 │   ├── aws/                   # AWS client implementations
-│   └── storage/               # File and data storage handlers
-├── config/                     # Configuration files
-│   ├── prepatch_config.yml    # Pre-patch workflow configuration
-│   └── __init__.py
+│   └── storage/               # Basic file storage handlers
 ├── inventory/                  # Landing zone definitions
 │   ├── nonprod_landing_zones.yml
-│   ├── prod_landing_zones.yml
-│   └── __init__.py
+│   └── prod_landing_zones.yml
 ├── tests/                      # Test suites
 │   ├── unit/                  # Unit tests
 │   ├── integration/           # Integration tests
 │   └── fixtures/              # Test fixtures
 ├── documents/                  # Documentation
-├── reports/                    # Generated reports directory
+├── reports/                    # Generated CSV reports directory
 ├── main.py                     # CLI entry point
 ├── demo.py                     # Architecture demonstration
 ├── config.yml                  # Main configuration file
@@ -49,12 +44,11 @@ patching/
 
 ## 🔄 Workflow Phases
 
-The pre-patch workflow consists of four main phases:
+The simplified pre-patch workflow consists of three main phases:
 
 1. **Scanner Phase**: Discover and inventory EC2 instances across landing zones
 2. **AMI Backup Phase**: Create backup AMIs for all discovered instances
-3. **Server Start Phase**: Start any stopped instances that need patching
-4. **Validation Phase**: Verify instance health and pre-patch readiness
+3. **Server Manager Phase**: Manage instance states and prepare for patching
 
 ## 🛠️ Installation
 
@@ -107,14 +101,14 @@ python main.py --help
 **Full prepatch workflow**:
 
 ```bash
-# Run complete 4-phase workflow
-python main.py --landing-zones lz250nonprod --environment nonprod
+# Run complete 3-phase workflow
+python main.py --landing-zones lz250nonprod
+
+# Run with multiple landing zones
+python main.py --landing-zones lz250nonprod,cmsnonprod
 
 # Run with custom configuration
-python main.py --config config/prepatch_config.yml --landing-zones lz250nonprod
-
-# Run with verbose logging
-python main.py --landing-zones lz250nonprod --verbose
+python main.py --config config.yml --landing-zones lz250nonprod
 ```
 
 **Scanner only**:
@@ -127,88 +121,81 @@ python main.py --scanner-only --landing-zones lz250nonprod,cmsnonprod
 python main.py --scanner-only --landing-zones lz250nonprod --output-dir custom_reports/
 ```
 
-### Environment Detection
-
-The tool automatically detects environments based on landing zone names:
-
-- **NonProd**: Landing zones containing `nonprod` (e.g., `lz250nonprod`, `cmsnonprod`)
-- **Prod**: Landing zones containing `prod` (e.g., `lz250prod`, `fotoolsprod`, `cmsprod`)
-
 ### Configuration
 
-The tool uses YAML-based configuration with environment-specific overrides:
+The tool uses a simple YAML-based configuration file (`config.yml`):
 
 ```yaml
-# config.yml
-workflow:
-  platform: "all" # windows, linux, or all
-  skip_backup: false
-  skip_validation: false
-  ami_timeout: 30
+# Simplified Patching Tool Configuration
+name: "Pre-Patch Workflow"
 
+# Landing zones to process
+landing_zones:
+  - "lz250nonprod"
+  - "cmsnonprod"
+
+# AWS settings
 aws:
-  role_name: "PatchingRole"
-  region: "us-east-1"
+  region: "ap-southeast-2"
+  role_name: "CMS-CrossAccount-Role"
+  timeout: 60
+  max_retries: 3
 
-output:
-  reports_dir: "reports"
-  verbose: false
+# Phase settings
+scanner:
+  enabled: true
+  timeout_minutes: 30
+  max_concurrent: 10
+
+ami_backup:
+  enabled: true
+  timeout_minutes: 60
+  max_concurrent: 5
+
+server_manager:
+  enabled: true
+  timeout_minutes: 10
+  max_concurrent: 10
+
+# Output settings
+output_dir: "reports"
+log_level: "INFO"
 ```
 
 ## 📊 Reports
 
-The tool generates comprehensive reports in multiple formats:
+The tool generates CSV reports for workflow tracking:
 
 ### CSV Reports
 
-- Instance inventory with patching status
-- Environment classification
-- AMI backup information
-- Pre-check results
-
-### JSON Reports
-
-- Detailed metadata and structured data
-- API-friendly format for integration
-- Backup creation timestamps
-- Retention policy information
-
-### HTML Reports
-
-- Interactive web-based reports
-- Workflow summaries and dashboards
-- Table-based data presentation
-
-### XML Reports
-
-- Structured data for enterprise systems
-- Schema-validated output
-- Integration with external tools
+- **Instance Inventory**: Complete list of discovered EC2 instances
+- **Landing Zone Details**: Account and region information
+- **AMI Backup Status**: Backup creation status and AMI IDs
+- **Instance States**: Current and target instance states
+- **Workflow Progress**: Phase completion status and timestamps
+- **Error Tracking**: Any issues encountered during execution
 
 ## 🏗️ Core Components
 
 ### Services
 
-- **ConfigService**: Configuration management and validation
-- **ScannerService**: EC2 instance discovery and inventory
+- **ConfigService**: Simple configuration management and validation
+- **ScannerService**: EC2 instance discovery across landing zones
 - **AMIBackupService**: Automated AMI backup creation
 - **ServerManagerService**: Instance state management
-- **ValidationService**: Pre-patch health checks
-- **ReportService**: Multi-format report generation
-- **WorkflowOrchestrator**: End-to-end workflow coordination
+- **WorkflowOrchestrator**: Streamlined 3-phase workflow coordination
 
 ### Infrastructure
 
 - **AWS Clients**: EC2, SSM, STS service integrations
-- **Storage Handlers**: File, CSV, JSON, XML, HTML operations
+- **File Storage**: Basic CSV and file operations
 - **Session Management**: Cross-account role assumption
 
 ### Models
 
-- **Instance**: EC2 instance representation
-- **LandingZone**: AWS account and region configuration
-- **WorkflowConfig**: Workflow execution parameters
-- **ReportData**: Structured report information
+- **Instance**: EC2 instance representation with metadata
+- **WorkflowConfig**: Simple workflow execution parameters
+- **PhaseResult**: Phase execution tracking and status
 
 ## 🔧 Configuration
 
@@ -219,25 +206,37 @@ Configure your landing zones in YAML files:
 - `inventory/nonprod_landing_zones.yml` - NonProd environments
 - `inventory/prod_landing_zones.yml` - Prod environments
 
-### Workflow Configuration
+### Main Configuration
 
-Customize workflow behavior in `config/prepatch_config.yml`:
+Customize workflow behavior in `config.yml`:
 
 ```yaml
-workflow:
-  phases:
-    scanner:
-      enabled: true
-      timeout: 300
-    ami_backup:
-      enabled: true
-      retention_days: 7
-    server_start:
-      enabled: true
-      wait_timeout: 600
-    validation:
-      enabled: true
-      health_checks: true
+# Simplified configuration with 3-phase workflow
+name: "Pre-Patch Workflow"
+
+landing_zones:
+  - "lz250nonprod"
+  - "cmsnonprod"
+
+aws:
+  region: "ap-southeast-2"
+  role_name: "CMS-CrossAccount-Role"
+
+# Phase settings for Scanner, AMI Backup, and Server Manager
+scanner:
+  enabled: true
+  timeout_minutes: 30
+  max_concurrent: 10
+
+ami_backup:
+  enabled: true
+  timeout_minutes: 60
+  max_concurrent: 5
+
+server_manager:
+  enabled: true
+  timeout_minutes: 10
+  max_concurrent: 10
 ```
 
 ## 🧪 Testing
@@ -259,6 +258,8 @@ python -m pytest tests/integration/
 ```bash
 python -m pytest tests/ --cov=core --cov=infrastructure --cov-report=html
 ```
+
+**Note**: The current test suite is minimal and needs expansion. See the [Configuration Guide](documents/configuration_guide.md) for testing recommendations.
 
 ## 🚨 Troubleshooting
 
@@ -283,10 +284,16 @@ python -m pytest tests/ --cov=core --cov=infrastructure --cov-report=html
 
 ### Debug Mode
 
-Enable verbose logging for detailed troubleshooting:
+Enable debug logging by setting the log level in `config.yml`:
+
+```yaml
+log_level: "DEBUG"
+```
+
+Or use a custom configuration file:
 
 ```bash
-python main.py --landing-zones lz250nonprod --verbose
+python main.py --config debug-config.yml --landing-zones lz250nonprod
 ```
 
 ## 🤝 Contributing
@@ -322,7 +329,7 @@ For questions, issues, or contributions:
 
 ---
 
-**Note**: This tool has been completely refactored with a clean architecture, improved performance, and enhanced maintainability. The legacy code has been removed and replaced with a modern, type-safe implementation following best practices.
+**Note**: This tool has been simplified with a streamlined 3-phase architecture, reduced complexity, and improved maintainability. The focus is on core functionality with CSV reporting and essential pre-patch operations.
 
 ## 🔒 Security
 

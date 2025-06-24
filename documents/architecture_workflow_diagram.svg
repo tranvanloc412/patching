@@ -1,0 +1,286 @@
+<svg width="1250" height="720" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .layer-title { font-family: Arial, sans-serif; font-size: 14px; font-weight: bold; fill: #2c3e50; }
+      .component { font-family: Arial, sans-serif; font-size: 11px; fill: #34495e; text-anchor: middle; }
+      .interface { fill: #ebf3fd; stroke: #3498db; stroke-width: 2; }
+      .service { fill: #e8f5e8; stroke: #27ae60; stroke-width: 2; }
+      .model { fill: #fdf2e9; stroke: #e67e22; stroke-width: 2; }
+      .infrastructure { fill: #f4ecf7; stroke: #9b59b6; stroke-width: 2; }
+      .external { fill: #f8f9fa; stroke: #6c757d; stroke-width: 2; }
+      .entry-point { fill: #fadbd8; stroke: #e74c3c; stroke-width: 2; }
+      .arrow { stroke: #34495e; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .dependency { stroke: #7f8c8d; stroke-width: 1.5; stroke-dasharray: 5,5; fill: none; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#34495e"/>
+    </marker>
+  </defs>
+  
+  <!-- Title -->
+  <text x="600" y="30" class="layer-title" text-anchor="middle">CMS Patching Tool - Architecture Workflow</text>
+  
+  <!-- Entry Point -->
+  <g id="entry-point">
+    <text x="50" y="70" class="layer-title">Entry Point</text>
+    <rect x="500" y="50" width="120" height="35" class="entry-point" rx="5"/>
+    <text x="560" y="72" class="component">main.py</text>
+  </g>
+  
+  <!-- Interfaces Layer -->
+  <g id="interfaces">
+    <text x="50" y="120" class="layer-title">Interfaces (Contracts)</text>
+    
+    <rect x="150" y="140" width="150" height="35" class="interface" rx="5"/>
+    <text x="225" y="162" class="component">IWorkflowOrchestrator</text>
+    
+    <rect x="320" y="140" width="125" height="35" class="interface" rx="5"/>
+    <text x="382" y="162" class="component">IScannerService</text>
+    
+    <rect x="465" y="140" width="135" height="35" class="interface" rx="5"/>
+    <text x="532" y="162" class="component">IAMIBackupService</text>
+    
+    <rect x="620" y="140" width="150" height="35" class="interface" rx="5"/>
+    <text x="695" y="162" class="component">IServerManagerService</text>
+    
+    <rect x="790" y="140" width="125" height="35" class="interface" rx="5"/>
+    <text x="852" y="162" class="component">IConfigService</text>
+    
+    <rect x="935" y="140" width="125" height="35" class="interface" rx="5"/>
+    <text x="997" y="162" class="component">IStorageService</text>
+  </g>
+  
+  <!-- Orchestration Layer -->
+  <g id="orchestration">
+    <text x="50" y="210" class="layer-title">Orchestration (Workflow Coordination)</text>
+    <rect x="480" y="220" width="160" height="35" class="entry-point" rx="5"/>
+    <text x="560" y="242" class="component">WorkflowOrchestrator</text>
+  </g>
+  
+  <!-- Services Layer -->
+  <g id="services">
+    <text x="50" y="290" class="layer-title">Services (Domain Logic)</text>
+    
+    <rect x="200" y="310" width="120" height="35" class="service" rx="5"/>
+    <text x="260" y="332" class="component">ScannerService</text>
+    
+    <rect x="350" y="310" width="130" height="35" class="service" rx="5"/>
+    <text x="415" y="332" class="component">AMIBackupService</text>
+    
+    <rect x="510" y="310" width="140" height="35" class="service" rx="5"/>
+    <text x="580" y="332" class="component">ServerManagerService</text>
+    
+    <rect x="680" y="310" width="120" height="35" class="service" rx="5"/>
+    <text x="740" y="332" class="component">ConfigService</text>
+    
+    <rect x="830" y="310" width="120" height="35" class="service" rx="5"/>
+    <text x="890" y="332" class="component">StorageService</text>
+  </g>
+  
+  <!-- Models Layer -->
+  <g id="models">
+    <text x="50" y="380" class="layer-title">Models (Data Structures)</text>
+    
+    <rect x="150" y="400" width="110" height="35" class="model" rx="5"/>
+    <text x="205" y="422" class="component">WorkflowResult</text>
+    
+    <rect x="280" y="400" width="80" height="35" class="model" rx="5"/>
+    <text x="320" y="422" class="component">Instance</text>
+    
+    <rect x="380" y="400" width="100" height="35" class="model" rx="5"/>
+    <text x="430" y="422" class="component">AMIBackup</text>
+    
+    <rect x="500" y="400" width="120" height="35" class="model" rx="5"/>
+    <text x="560" y="422" class="component">ServerOperation</text>
+    
+    <rect x="640" y="400" width="120" height="35" class="model" rx="5"/>
+    <text x="700" y="422" class="component">WorkflowConfig</text>
+    
+    <rect x="780" y="400" width="80" height="35" class="model" rx="5"/>
+    <text x="820" y="422" class="component">Report</text>
+    
+    <rect x="880" y="400" width="100" height="35" class="model" rx="5"/>
+    <text x="930" y="422" class="component">LandingZone</text>
+  </g>
+  
+  <!-- Infrastructure Layer -->
+  <g id="infrastructure">
+    <text x="50" y="470" class="layer-title">Infrastructure (AWS &amp; Storage)</text>
+    
+    <rect x="150" y="490" width="150" height="35" class="infrastructure" rx="5"/>
+    <text x="225" y="512" class="component">AWSSessionManager</text>
+    
+    <rect x="320" y="490" width="95" height="35" class="infrastructure" rx="5"/>
+    <text x="367" y="512" class="component">EC2Client</text>
+    
+    <rect x="435" y="490" width="95" height="35" class="infrastructure" rx="5"/>
+    <text x="482" y="512" class="component">SSMClient</text>
+    
+    <rect x="550" y="490" width="95" height="35" class="infrastructure" rx="5"/>
+    <text x="597" y="512" class="component">STSClient</text>
+    
+    <rect x="665" y="490" width="105" height="35" class="infrastructure" rx="5"/>
+    <text x="717" y="512" class="component">FileStorage</text>
+    
+    <rect x="790" y="490" width="105" height="35" class="infrastructure" rx="5"/>
+    <text x="842" y="512" class="component">CSVHandler</text>
+  </g>
+  
+  <!-- External Systems -->
+  <g id="external">
+    <text x="50" y="560" class="layer-title">External Systems</text>
+    
+    <rect x="200" y="580" width="95" height="35" class="external" rx="5"/>
+    <text x="247" y="602" class="component">AWS EC2</text>
+    
+    <rect x="315" y="580" width="100" height="35" class="external" rx="5"/>
+    <text x="365" y="602" class="component">AWS SSM</text>
+    
+    <rect x="435" y="580" width="95" height="35" class="external" rx="5"/>
+    <text x="482" y="602" class="component">AWS STS</text>
+    
+    <rect x="550" y="580" width="105" height="35" class="external" rx="5"/>
+    <text x="602" y="602" class="component">File System</text>
+    
+    <rect x="675" y="580" width="135" height="35" class="external" rx="5"/>
+    <text x="742" y="602" class="component">Configuration Files</text>
+  </g>
+  
+  <!-- Workflow Flow Arrows -->
+  <g id="workflow-flow">
+    <!-- Entry Point to Orchestrator -->
+    <path d="M 560 85 L 560 220" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrowhead)" stroke-dasharray="5,5"/>
+    
+    <!-- Orchestrator to Services - Enhanced with phase indicators -->
+    <!-- Phase 1: Scanner Service -->
+    <path d="M 520 255 L 520 280 L 260 280 L 260 310" stroke="#28a745" stroke-width="3" fill="none" marker-end="url(#arrowhead)"/>
+    <text x="390" y="275" class="component" style="font-size: 10px; fill: #28a745; font-weight: bold;">Phase 1: Discovery</text>
+    
+    <!-- Phase 2: AMI Backup Service -->
+    <path d="M 540 255 L 540 290 L 415 290 L 415 310" stroke="#17a2b8" stroke-width="3" fill="none" marker-end="url(#arrowhead)"/>
+    <text x="477" y="285" class="component" style="font-size: 10px; fill: #17a2b8; font-weight: bold;">Phase 2: Backup</text>
+    
+    <!-- Phase 3: Server Manager Service -->
+    <path d="M 560 255 L 560 300 L 580 300 L 580 310" stroke="#dc3545" stroke-width="3" fill="none" marker-end="url(#arrowhead)"/>
+    <text x="570" y="295" class="component" style="font-size: 10px; fill: #dc3545; font-weight: bold;">Phase 3: Patching</text>
+    
+    <!-- Supporting Services - Config & Storage -->
+    <path d="M 580 255 L 580 270 L 740 270 L 740 310" stroke="#6c757d" stroke-width="2" fill="none" marker-end="url(#arrowhead)" stroke-dasharray="3,3"/>
+    <text x="660" y="265" class="component" style="font-size: 10px; fill: #6c757d;">Config Support</text>
+    
+    <path d="M 600 255 L 600 275 L 890 275 L 890 310" stroke="#6c757d" stroke-width="2" fill="none" marker-end="url(#arrowhead)" stroke-dasharray="3,3"/>
+    <text x="745" y="270" class="component" style="font-size: 10px; fill: #6c757d;">Storage Support</text>
+  </g>
+  
+  <!-- Interface to Service Dependencies -->
+  <g id="interface-dependencies" stroke="#059669" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)" stroke-dasharray="3,3">
+    <!-- Interface to Service connections -->
+    <path d="M 225 175 L 225 280 L 260 280 L 260 310"/>
+    <path d="M 382 175 L 382 280 L 415 280 L 415 310"/>
+    <path d="M 532 175 L 532 280 L 580 280 L 580 310"/>
+    <path d="M 695 175 L 695 280 L 740 280 L 740 310"/>
+    <path d="M 852 175 L 852 280 L 890 280 L 890 310"/>
+    <path d="M 997 175 L 997 280 L 890 280 L 890 310"/>
+  </g>
+  
+  <!-- Service to Model Dependencies -->
+  <g id="service-model-dependencies" stroke="#dc2626" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)">
+    <!-- Service to Model connections -->
+    <path d="M 260 345 L 205 345 L 205 400"/>
+    <path d="M 260 345 L 320 345 L 320 400"/>
+    
+    <path d="M 415 345 L 430 345 L 430 400"/>
+    
+    <path d="M 580 345 L 560 345 L 560 400"/>
+    
+    <path d="M 740 345 L 700 345 L 700 400"/>
+    
+    <path d="M 890 345 L 820 345 L 820 400"/>
+    <path d="M 890 345 L 930 345 L 930 400"/>
+  </g>
+  
+  <!-- Service to Infrastructure Dependencies -->
+  <g id="service-infrastructure-dependencies" stroke="#7c3aed" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)">
+    <!-- Service to Infrastructure connections -->
+    <path d="M 260 345 L 225 345 L 225 490"/>
+    <path d="M 415 345 L 367 345 L 367 490"/>
+    <path d="M 580 345 L 482 345 L 482 490"/>
+    <path d="M 740 345 L 717 345 L 717 490"/>
+    <path d="M 890 345 L 842 345 L 842 490"/>
+  </g>
+  
+  <!-- Infrastructure to External Systems -->
+  <g id="infrastructure-external-dependencies" stroke="#ea580c" stroke-width="1.5" fill="none" marker-end="url(#arrowhead)">
+    <!-- Infrastructure to External connections -->
+    <path d="M 225 525 L 247 525 L 247 580"/>
+    <path d="M 367 525 L 365 525 L 365 580"/>
+    <path d="M 482 525 L 482 525 L 482 580"/>
+    <path d="M 597 525 L 602 525 L 602 580"/>
+    <path d="M 717 525 L 742 525 L 742 580"/>
+  </g>
+  
+  <!-- 3-Phase Workflow Box -->
+  <g id="workflow-phases">
+    <rect x="1050" y="200" width="140" height="180" fill="#f8f9fa" stroke="#6c757d" stroke-width="1" rx="5"/>
+    <text x="1120" y="220" text-anchor="middle" class="layer-title">3-Phase Workflow</text>
+    
+    <rect x="1060" y="235" width="120" height="30" fill="#d4edda" stroke="#28a745" stroke-width="2" rx="3"/>
+    <text x="1120" y="253" text-anchor="middle" class="component">1. Scanner Phase</text>
+    
+    <rect x="1060" y="275" width="120" height="30" fill="#d1ecf1" stroke="#17a2b8" stroke-width="2" rx="3"/>
+    <text x="1120" y="293" text-anchor="middle" class="component">2. AMI Backup Phase</text>
+    
+    <rect x="1060" y="315" width="120" height="30" fill="#f8d7da" stroke="#dc3545" stroke-width="2" rx="3"/>
+    <text x="1120" y="333" text-anchor="middle" class="component">3. Server Manager Phase</text>
+    
+    <text x="1120" y="365" text-anchor="middle" class="component" style="font-size: 10px;">Each phase uses multiple</text>
+    <text x="1120" y="375" text-anchor="middle" class="component" style="font-size: 10px;">services orchestrated by</text>
+    <text x="1120" y="385" text-anchor="middle" class="component" style="font-size: 10px;">WorkflowOrchestrator</text>
+    
+    <!-- Connection from Orchestrator to Workflow Box -->
+    <path d="M 640 237 L 1050 237" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrowhead)" stroke-dasharray="8,4"/>
+    <text x="845" y="232" class="component" style="font-size: 10px; fill: #2563eb; font-weight: bold;">Coordinates Phases</text>
+  </g>
+  
+  <!-- Legend -->
+  <g id="legend">
+    <text x="50" y="650" class="layer-title">Legend:</text>
+    
+    <rect x="50" y="665" width="15" height="15" class="interface" rx="2"/>
+    <text x="75" y="677" class="component">Interface (Contract)</text>
+    
+    <rect x="200" y="665" width="15" height="15" class="entry-point" rx="2"/>
+    <text x="225" y="677" class="component">Orchestration</text>
+    
+    <rect x="320" y="665" width="15" height="15" class="service" rx="2"/>
+    <text x="345" y="677" class="component">Service (Domain)</text>
+    
+    <rect x="460" y="665" width="15" height="15" class="model" rx="2"/>
+    <text x="485" y="677" class="component">Model (Data)</text>
+    
+    <rect x="580" y="665" width="15" height="15" class="infrastructure" rx="2"/>
+    <text x="605" y="677" class="component">Infrastructure</text>
+    
+    <rect x="700" y="665" width="15" height="15" class="external" rx="2"/>
+    <text x="725" y="677" class="component">External Systems</text>
+    
+    <line x1="50" y1="695" x2="80" y2="695" stroke="#2563eb" stroke-width="2" marker-end="url(#arrowhead)"/>
+    <text x="90" y="700" class="component">Workflow Flow</text>
+    
+    <line x1="180" y1="695" x2="210" y2="695" stroke="#059669" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#arrowhead)"/>
+    <text x="220" y="700" class="component">Interface Dependency</text>
+    
+    <!-- Phase-specific arrows -->
+    <line x1="50" y1="715" x2="80" y2="715" stroke="#28a745" stroke-width="3" marker-end="url(#arrowhead)"/>
+    <text x="90" y="720" class="component">Phase 1: Discovery</text>
+    
+    <line x1="200" y1="715" x2="230" y2="715" stroke="#17a2b8" stroke-width="3" marker-end="url(#arrowhead)"/>
+    <text x="240" y="720" class="component">Phase 2: Backup</text>
+    
+    <line x1="350" y1="715" x2="380" y2="715" stroke="#dc3545" stroke-width="3" marker-end="url(#arrowhead)"/>
+    <text x="390" y="720" class="component">Phase 3: Patching</text>
+    
+    <line x1="500" y1="715" x2="530" y2="715" stroke="#6c757d" stroke-width="2" stroke-dasharray="3,3" marker-end="url(#arrowhead)"/>
+    <text x="540" y="720" class="component">Support Services</text>
+  </g>
+</svg>

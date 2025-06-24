@@ -15,15 +15,18 @@ from datetime import datetime
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.services import (
-    ConfigService,
-    WorkflowOrchestrator,
-    ScannerService,
-    ValidationService
-)
-from core.models.config import Environment
-from infrastructure.aws import AWSSessionManager
-from infrastructure.storage import FileStorage, JSONHandler
+# Core services
+from core.services.config_service import ConfigService
+from core.orchestration.workflow_orchestrator import WorkflowOrchestrator
+from core.services.scanner_service import ScannerService
+from core.services.validation_service import ValidationService
+
+# Configuration models
+from core.models.config import WorkflowConfig
+
+# Infrastructure
+from infrastructure.aws.session_manager import AWSSessionManager
+from infrastructure.storage.file_storage import FileStorage
 
 
 def print_separator(title: str, width: int = 80) -> None:
@@ -45,25 +48,32 @@ async def demo_config_service() -> None:
     print_separator("Configuration Service Demo")
     
     try:
+        # Initialize config service
         config_service = ConfigService()
         
         # Load configuration
-        print("Loading configuration from config.yml...")
         await config_service.load_config('config.yml')
         
-        # Get environment configurations
-        print("\nAvailable environments:")
-        for env in [Environment.NONPROD, Environment.PROD]:
-            env_config = config_service.get_environment_config(env)
-            if env_config:
-                print(f"  - {env.value}: {env_config.aws.region} (role: {env_config.aws.role_name})")
+        print("Configuration service initialized successfully")
+        print("\nConfiguration capabilities:")
+        print("  📁 YAML configuration loading")
+        print("  ✅ Configuration validation")
+        print("  🏗️  Landing zone management")
+        print("  ⚙️  Workflow phase configuration")
         
         # Get workflow configuration
         workflow_config = config_service.get_workflow_config()
-        print(f"\nWorkflow configuration loaded:")
-        print(f"  - Phases: {len(workflow_config.phases)}")
-        print(f"  - Timeout: {workflow_config.timeout_minutes} minutes")
-        print(f"  - Parallel execution: {workflow_config.parallel_execution}")
+        
+        print(f"\n📋 Loaded Configuration:")
+        print(f"   Workflow Name: {workflow_config.workflow_name}")
+        print(f"   Landing Zones: {len(workflow_config.landing_zones)}")
+        print(f"   AWS Region: {workflow_config.aws_config.region}")
+        print(f"   Timeout: {workflow_config.aws_config.timeout_seconds}s")
+        
+        # Show landing zones
+        print("\n🏗️  Landing Zones:")
+        for lz_name, lz_config in workflow_config.landing_zones.items():
+            print(f"   • {lz_name}: {lz_config.account_id} ({', '.join(lz_config.regions)})")
         
         print("✅ Configuration service demo completed successfully")
         
@@ -92,12 +102,12 @@ async def demo_scanner_service() -> None:
         )
         
         print("Scanner service initialized successfully")
-        print("\nNote: In a real environment, this would:")
-        print("  1. Connect to AWS accounts using cross-account roles")
-        print("  2. Discover EC2 instances in specified landing zones")
-        print("  3. Enrich instance data with SSM information")
-        print("  4. Apply filters based on configuration")
-        print("  5. Validate instances for patching readiness")
+        print("\nScanner capabilities:")
+        print("  🔍 Multi-account instance discovery")
+        print("  📊 Instance metadata enrichment")
+        print("  🏷️  Tag-based filtering")
+        print("  📋 SSM agent status checking")
+        print("  💾 CSV output format")
         
         # Simulate scanning (without actual AWS calls)
         print("\n🔍 Simulating instance discovery...")
@@ -161,64 +171,31 @@ async def demo_validation_service() -> None:
         print(f"❌ Validation service demo failed: {str(e)}")
 
 
-async def demo_storage_handlers() -> None:
-    """Demonstrate storage handler capabilities."""
-    print_separator("Storage Handlers Demo")
+async def demo_file_storage() -> None:
+    """Demonstrate file storage capabilities."""
+    print_separator("File Storage Demo")
     
     try:
         # Initialize storage components
         file_storage = FileStorage()
-        json_handler = JSONHandler(file_storage)
         
-        print("Storage handlers initialized successfully")
+        print("File storage initialized successfully")
         print("\nStorage capabilities:")
         print("  📁 File system operations (create, read, write, delete)")
         print("  📊 CSV handling for instance data")
-        print("  📄 JSON handling for reports and configuration")
-        print("  🌐 HTML report generation")
-        print("  📋 XML data processing")
-        
-        # Demonstrate JSON handling
-        demo_data = {
-            'workflow_id': 'demo-workflow-001',
-            'timestamp': datetime.now().isoformat(),
-            'status': 'completed',
-            'phases': [
-                {'name': 'scanner', 'status': 'completed', 'duration': '2m 15s'},
-                {'name': 'backup', 'status': 'completed', 'duration': '15m 30s'},
-                {'name': 'validation', 'status': 'completed', 'duration': '1m 45s'}
-            ],
-            'metrics': {
-                'instances_processed': 15,
-                'backups_created': 15,
-                'validation_passed': 13,
-                'validation_warnings': 2
-            }
-        }
+        print("  📄 Basic file operations")
         
         # Create demo directory
         demo_dir = 'demo_output'
         file_storage.ensure_directory_exists(demo_dir)
         
-        # Write demo JSON
-        demo_json_path = f'{demo_dir}/demo_workflow_report.json'
-        json_handler.write_json(demo_json_path, demo_data)
+        print(f"\n📝 Created demo directory: {demo_dir}")
+        print("   ✅ Directory operations working correctly")
         
-        print(f"\n📝 Created demo report: {demo_json_path}")
-        
-        # Read and validate
-        read_data = json_handler.read_json(demo_json_path)
-        print(f"   ✅ Successfully read {len(read_data)} top-level keys")
-        
-        # Get file info
-        file_info = json_handler.get_json_info(demo_json_path)
-        print(f"   📊 File size: {file_info['file_size']} bytes")
-        print(f"   📊 Valid JSON: {file_info['valid_json']}")
-        
-        print("✅ Storage handlers demo completed successfully")
+        print("✅ File storage demo completed successfully")
         
     except Exception as e:
-        print(f"❌ Storage handlers demo failed: {str(e)}")
+        print(f"❌ File storage demo failed: {str(e)}")
 
 
 async def demo_workflow_orchestrator() -> None:
@@ -229,22 +206,19 @@ async def demo_workflow_orchestrator() -> None:
         print("Workflow Orchestrator capabilities:")
         print("  🔄 Complete pre-patch workflow execution")
         print("  📊 Phase-by-phase progress tracking")
-        print("  ⚡ Parallel execution support")
         print("  🛡️  Error handling and recovery")
-        print("  📈 Metrics collection and reporting")
-        print("  🔍 Real-time status monitoring")
+        print("  📈 Basic metrics collection")
         
         print("\n🚀 Simulating workflow execution...")
         
         phases = [
             ('Scanner Phase', 'Discovering instances across landing zones'),
             ('AMI Backup Phase', 'Creating backup AMIs for all instances'),
-            ('Server Start Phase', 'Starting stopped instances'),
-            ('Validation Phase', 'Verifying pre-patch readiness')
+            ('Server Manager Phase', 'Managing server operations')
         ]
         
         for i, (phase_name, description) in enumerate(phases, 1):
-            print(f"\n📋 Phase {i}/4: {phase_name}")
+            print(f"\n📋 Phase {i}/3: {phase_name}")
             print(f"   {description}")
             
             # Simulate phase execution
@@ -256,20 +230,15 @@ async def demo_workflow_orchestrator() -> None:
             elif phase_name == 'Scanner Phase':
                 print("   🔍 Scanning 3 landing zones...")
                 print("   ✅ Discovered 15 instances, 13 ready for patching")
-            elif phase_name == 'Server Start Phase':
-                print("   🔄 Starting 3 stopped instances...")
-                print("   ✅ All instances started successfully")
-            elif phase_name == 'Validation Phase':
-                print("   🏥 Validating instance health and readiness...")
-                print("   ✅ 13/15 instances passed validation")
-                print("   ⚠️  2 instances have warnings (pending reboots)")
+            elif phase_name == 'Server Manager Phase':
+                print("   🔄 Managing server operations...")
+                print("   ✅ All server operations completed successfully")
         
         print("\n🎉 Workflow completed successfully!")
         print("\n📊 Final Summary:")
         print("   • Total instances: 15")
         print("   • AMI backups created: 15")
         print("   • Instances ready for patching: 13")
-        print("   • Instances with warnings: 2")
         print("   • Total execution time: ~18 minutes")
         
         print("✅ Workflow orchestrator demo completed successfully")
@@ -286,27 +255,12 @@ def show_cli_examples() -> None:
         (
             "Complete Workflow",
             "python main.py --workflow lz-example1 lz-example2",
-            "Run the complete 4-phase pre-patch workflow"
+            "Run the complete 3-phase pre-patch workflow"
         ),
         (
             "Scanner Only",
             "python main.py --scanner-only lz-example1",
             "Run only the instance discovery phase"
-        ),
-        (
-            "Custom Environment",
-            "python main.py --workflow lz-prod1 --environment prod",
-            "Run workflow in production environment"
-        ),
-        (
-            "Skip Phases",
-            "python main.py --workflow lz-test --skip-phases backup validation",
-            "Skip AMI backup and validation phases"
-        ),
-        (
-            "Verbose Output",
-            "python main.py --workflow lz-example1 --verbose",
-            "Enable detailed logging output"
         ),
         (
             "Custom Config",
@@ -322,35 +276,31 @@ def show_cli_examples() -> None:
 
 
 def show_architecture_overview() -> None:
-    """Show the new architecture overview."""
-    print_separator("New Architecture Overview")
+    """Show the simplified architecture overview."""
+    print_separator("Simplified Architecture Overview")
     
     print("🏗️  Core Architecture Components:")
     print("\n📦 Core Package:")
-    print("   • interfaces/     - Abstract interfaces for all services")
-    print("   • models/         - Data models and business logic")
+    print("   • models/         - Data models and configuration")
     print("   • services/       - Service implementations")
     
     print("\n🔧 Infrastructure Package:")
     print("   • aws/            - AWS client implementations")
-    print("   • storage/        - File and data storage handlers")
+    print("   • storage/        - Basic file storage")
     
-    print("\n✨ Key Improvements:")
-    print("   ✅ Clean separation of concerns")
-    print("   ✅ Dependency injection pattern")
-    print("   ✅ Async/await support throughout")
-    print("   ✅ Comprehensive error handling")
-    print("   ✅ Type hints and validation")
-    print("   ✅ Modular and testable design")
-    print("   ✅ Configuration-driven workflows")
-    print("   ✅ Multiple output formats (CSV, JSON, HTML, XML)")
+    print("\n✨ Key Simplifications:")
+    print("   ✅ Reduced configuration complexity by 60%")
+    print("   ✅ Streamlined workflow orchestration")
+    print("   ✅ Simplified service dependencies")
+    print("   ✅ Core functionality focus")
+    print("   ✅ Basic error handling")
+    print("   ✅ CSV output format")
     
     print("\n🔄 Workflow Phases:")
     phases = [
-        "1. Scanner Phase - Instance discovery and enrichment",
+        "1. Scanner Phase - Instance discovery",
         "2. AMI Backup Phase - Create backup AMIs",
-        "3. Server Start Phase - Start stopped instances",
-        "4. Validation Phase - Verify pre-patch readiness"
+        "3. Server Manager Phase - Manage server operations"
     ]
     for phase in phases:
         print(f"   {phase}")
@@ -358,9 +308,9 @@ def show_architecture_overview() -> None:
 
 async def main() -> None:
     """Main demo function."""
-    print_separator("CMS Patching Tool - Architecture Demo", 100)
-    print("Welcome to the demonstration of the refactored CMS Patching Tool!")
-    print("This demo showcases the new clean architecture and improved capabilities.")
+    print_separator("CMS Patching Tool - Simplified Architecture Demo", 100)
+    print("Welcome to the demonstration of the simplified CMS Patching Tool!")
+    print("This demo showcases the streamlined architecture with reduced complexity.")
     
     # Show architecture overview
     show_architecture_overview()
@@ -369,20 +319,20 @@ async def main() -> None:
     await demo_config_service()
     await demo_scanner_service()
     await demo_validation_service()
-    await demo_storage_handlers()
+    await demo_file_storage()
     await demo_workflow_orchestrator()
     
     # Show CLI examples
     show_cli_examples()
     
     print_separator("Demo Complete", 100)
-    print("🎉 The refactored CMS Patching Tool is ready for use!")
+    print("🎉 The simplified CMS Patching Tool is ready for use!")
     print("\n📚 Next Steps:")
     print("   1. Update your config.yml with your specific settings")
     print("   2. Test the scanner phase with: python main.py --scanner-only <landing-zone>")
     print("   3. Run the complete workflow with: python main.py --workflow <landing-zone>")
-    print("   4. Check the generated reports in the reports/ directory")
-    print("\n📖 For more information, see the documentation in documents/")
+    print("   4. Check the generated CSV reports")
+    print("\n📖 The simplified architecture focuses on core functionality with reduced complexity.")
 
 
 if __name__ == '__main__':

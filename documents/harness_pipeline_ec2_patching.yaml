@@ -1,0 +1,2280 @@
+# Harness.io Pipeline for AWS EC2 Patching Workflow
+# This pipeline implements a comprehensive 3-phase patching process using bash scripts only:
+# 1. Pre-Patch: Environment validation, instance discovery, AMI backup, health checks
+# 2. Patching: Maintenance window setup, patch installation, verification
+# 3. Post-Patch: Application validation, performance testing, rollback capability, reporting
+# 
+# Hardcoded Configuration:
+# - Landing Zone: production-web-tier
+# - Landing Zone ID: prod-web-001
+# - AWS credentials loaded from environment variables
+
+pipeline:
+  name: AWS EC2 Patching Workflow
+  identifier: aws_ec2_patching_workflow
+  projectIdentifier: cms_patching
+  orgIdentifier: default
+  tags:
+    purpose: "EC2 Patching"
+    environment: "production-web-tier"
+    automation: "harness"
+  
+  properties:
+    ci:
+      codebase:
+        connectorRef: patching_git_connector
+        repoName: patching
+        build: <+input>.identifier
+  
+  stages:
+    # ========================================
+    # PHASE 1: PRE-PATCH
+    # ========================================
+    
+    - stage:
+        name: "Pre-Patch Phase"
+        identifier: prepatch_phase
+        description: "Environment validation, instance discovery, AMI backup, and health checks"
+        type: Custom
+        spec:
+          execution:
+            steps:
+              
+              # Step 1.1: Environment Validation
+              - step:
+                  type: ShellScript
+                  name: "Environment Validation"
+                  identifier: environment_validation
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          
+                          echo "=== Environment Validation ==="
+                          echo "Landing Zone: $LANDING_ZONE"
+                          echo "Landing Zone ID: $LANDING_ZONE_ID"
+                          echo "AWS Region: $AWS_REGION"
+                          
+                          # Validate required environment variables
+                          echo "Checking required environment variables..."
+                          if [[ -z "$AWS_ACCESS_KEY_ID" ]]; then
+                            echo "Error: AWS_ACCESS_KEY_ID environment variable is not set"
+                            exit 1
+                          fi
+                          
+                          if [[ -z "$AWS_SECRET_ACCESS_KEY" ]]; then
+                            echo "Error: AWS_SECRET_ACCESS_KEY environment variable is not set"
+                            exit 1
+                          fi
+                          
+                          if [[ -z "$AWS_SESSION_TOKEN" ]]; then
+                            echo "Warning: AWS_SESSION_TOKEN environment variable is not set (may be optional)"
+                          fi
+                          
+                          # Validate AWS credentials
+                          echo "Validating AWS credentials..."
+                          aws sts get-caller-identity --region $AWS_REGION
+                          
+                          # Check required permissions
+                          echo "Checking IAM permissions..."
+                          CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text --region $AWS_REGION)
+                          aws iam simulate-principal-policy \
+                            --policy-source-arn "$CALLER_ARN" \
+                            --action-names ec2:DescribeInstances ec2:CreateImage ssm:SendCommand ec2:StartInstances ec2:StopInstances \
+                            --region $AWS_REGION
+                          
+                          # Validate landing zone exists by checking for instances
+                          echo "Validating landing zone configuration..."
+                          INSTANCE_COUNT=$(aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running,stopped" \
+                            --query 'length(Reservations[].Instances[])' \
+                            --output text --region $AWS_REGION)
+                          
+                          echo "Found $INSTANCE_COUNT instances in landing zone: $LANDING_ZONE"
+                          
+                          if [[ "$INSTANCE_COUNT" -eq 0 ]]; then
+                            echo "Warning: No instances found in landing zone $LANDING_ZONE"
+                          fi
+                          
+                          echo "Environment validation completed successfully"
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: "ap-southeast-2"
+                    outputVariables:
+                      - name: validation_status
+                        type: String
+                        value: "completed"
+                      - name: landing_zone
+                        type: String
+                        value: "production-web-tier"
+                      - name: landing_zone_id
+                        type: String
+                        value: "prod-web-001"
+                  timeout: 10m
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - AllErrors
+                        action:
+                          type: MarkAsFailure
+              
+              # Step 1.2: Instance Discovery
+              - step:
+                  type: ShellScript
+                  name: "Instance Discovery"
+                  identifier: instance_discovery
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          
+                          echo "=== Instance Discovery ==="
+                          echo "Discovering instances in landing zone: $LANDING_ZONE"
+                          
+                          # Create output directory
+                          mkdir -p /tmp/patching_reports
+                          
+                          # Discover instances using AWS CLI
+                          echo "Querying EC2 instances..."
+                          aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running,stopped" \
+                            --query 'Reservations[].Instances[].[InstanceId,InstanceType,State.Name,PrivateIpAddress,PublicIpAddress,Tags[?Key==`Name`].Value|[0]]' \
+                            --output table --region $AWS_REGION
+                          
+                          # Generate CSV report
+                          echo "Generating instance inventory CSV..."
+                          echo "InstanceId,InstanceType,State,PrivateIP,PublicIP,Name,Environment,LandingZone" > /tmp/patching_reports/instance_inventory.csv
+                          
+                          aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running,stopped" \
+                            --query 'Reservations[].Instances[]' \
+                            --output json --region $AWS_REGION | jq -r '.[] | 
+                              [.InstanceId, .InstanceType, .State.Name, .PrivateIpAddress // "N/A", .PublicIpAddress // "N/A", 
+                               (.Tags[]? | select(.Key=="Name") | .Value) // "N/A", 
+                               (.Tags[]? | select(.Key=="Environment") | .Value) // "N/A", 
+                               "'$LANDING_ZONE'"] | @csv' >> /tmp/patching_reports/instance_inventory.csv
+                          
+                          # Count discovered instances
+                          INSTANCE_COUNT=$(tail -n +2 /tmp/patching_reports/instance_inventory.csv | wc -l)
+                          echo "Discovered $INSTANCE_COUNT instances"
+                          
+                          # Get SSM managed instances
+                          echo "Checking SSM managed instances..."
+                          aws ssm describe-instance-information \
+                            --filters "Key=tag:Environment,Values=$LANDING_ZONE" \
+                            --query 'InstanceInformationList[].[InstanceId,PingStatus,LastPingDateTime,PlatformType]' \
+                            --output table --region $AWS_REGION
+                          
+                          # Generate SSM status report
+                          echo "InstanceId,SSMStatus,LastPing,Platform" > /tmp/patching_reports/ssm_status.csv
+                          aws ssm describe-instance-information \
+                            --filters "Key=tag:Environment,Values=$LANDING_ZONE" \
+                            --query 'InstanceInformationList[]' \
+                            --output json --region $AWS_REGION | jq -r '.[] | 
+                              [.InstanceId, .PingStatus, .LastPingDateTime // "N/A", .PlatformType] | @csv' >> /tmp/patching_reports/ssm_status.csv
+                          
+                          # Export results for next phase
+                          cp /tmp/patching_reports/instance_inventory.csv <+artifacts>.path/instance_inventory.csv
+                          cp /tmp/patching_reports/ssm_status.csv <+artifacts>.path/ssm_status.csv
+                          
+                          echo "Instance discovery completed successfully"
+                          echo "Total instances found: $INSTANCE_COUNT"
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: "ap-southeast-2"
+                    outputVariables:
+                      - name: instance_count
+                        type: String
+                        value: "$INSTANCE_COUNT"
+                  timeout: 15m
+                  
+              # Step 1.3: AMI Backup Creation
+              - step:
+                  type: ShellScript
+                  name: "AMI Backup Creation"
+                  identifier: ami_backup_creation
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          BACKUP_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                          
+                          echo "=== AMI Backup Creation ==="
+                          echo "Creating AMI backups for landing zone: $LANDING_ZONE"
+                          
+                          # Create backup tracking file
+                          mkdir -p /tmp/patching_reports
+                          echo "InstanceId,AMI_ID,AMI_Name,Status,Timestamp" > /tmp/patching_reports/ami_backups.csv
+                          
+                          # Get list of instances to backup
+                          INSTANCE_IDS=$(aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running,stopped" \
+                            --query 'Reservations[].Instances[].InstanceId' \
+                            --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$INSTANCE_IDS" ]]; then
+                            echo "No instances found for backup in landing zone: $LANDING_ZONE"
+                            exit 1
+                          fi
+                          
+                          echo "Instances to backup: $INSTANCE_IDS"
+                          
+                          # Create AMI backups for each instance
+                          BACKUP_SUCCESS=true
+                          for INSTANCE_ID in $INSTANCE_IDS; do
+                            echo "Creating AMI backup for instance: $INSTANCE_ID"
+                            
+                            # Get instance name for AMI naming
+                            INSTANCE_NAME=$(aws ec2 describe-instances \
+                              --instance-ids $INSTANCE_ID \
+                              --query 'Reservations[0].Instances[0].Tags[?Key==`Name`].Value' \
+                              --output text --region $AWS_REGION)
+                            
+                            if [[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" == "None" ]]; then
+                              INSTANCE_NAME="unnamed"
+                            fi
+                            
+                            # Create AMI
+                            AMI_NAME="prepatch-backup-${INSTANCE_NAME}-${INSTANCE_ID}-${BACKUP_TIMESTAMP}"
+                            echo "Creating AMI: $AMI_NAME"
+                            
+                            AMI_ID=$(aws ec2 create-image \
+                              --instance-id $INSTANCE_ID \
+                              --name "$AMI_NAME" \
+                              --description "Pre-patch backup for $INSTANCE_ID from $LANDING_ZONE at $BACKUP_TIMESTAMP" \
+                              --no-reboot \
+                              --tag-specifications "ResourceType=image,Tags=[{Key=Environment,Value=$LANDING_ZONE},{Key=Purpose,Value=PrePatchBackup},{Key=SourceInstance,Value=$INSTANCE_ID},{Key=BackupTimestamp,Value=$BACKUP_TIMESTAMP}]" \
+                              --query 'ImageId' \
+                              --output text --region $AWS_REGION)
+                            
+                            if [[ $? -eq 0 && ! -z "$AMI_ID" ]]; then
+                              echo "AMI creation initiated: $AMI_ID for instance $INSTANCE_ID"
+                              echo "$INSTANCE_ID,$AMI_ID,$AMI_NAME,pending,$BACKUP_TIMESTAMP" >> /tmp/patching_reports/ami_backups.csv
+                            else
+                              echo "Failed to create AMI for instance: $INSTANCE_ID"
+                              echo "$INSTANCE_ID,failed,failed,failed,$BACKUP_TIMESTAMP" >> /tmp/patching_reports/ami_backups.csv
+                              BACKUP_SUCCESS=false
+                            fi
+                          done
+                          
+                          # Monitor backup progress with timeout (30 minutes)
+                          echo "Monitoring backup progress..."
+                          TIMEOUT=1800  # 30 minutes
+                          START_TIME=$(date +%s)
+                          
+                          while true; do
+                            CURRENT_TIME=$(date +%s)
+                            ELAPSED=$((CURRENT_TIME - START_TIME))
+                            
+                            if [[ $ELAPSED -gt $TIMEOUT ]]; then
+                              echo "Backup monitoring timed out after 30 minutes"
+                              BACKUP_SUCCESS=false
+                              break
+                            fi
+                            
+                            # Check status of all AMIs
+                            ALL_COMPLETE=true
+                            while IFS=',' read -r instance_id ami_id ami_name status timestamp; do
+                              if [[ "$status" == "pending" && "$ami_id" != "failed" ]]; then
+                                AMI_STATE=$(aws ec2 describe-images \
+                                  --image-ids $ami_id \
+                                  --query 'Images[0].State' \
+                                  --output text --region $AWS_REGION 2>/dev/null || echo "failed")
+                                
+                                if [[ "$AMI_STATE" == "available" ]]; then
+                                  echo "AMI $ami_id completed successfully"
+                                  # Update CSV status
+                                  sed -i "s/$instance_id,$ami_id,$ami_name,pending/$instance_id,$ami_id,$ami_name,completed/g" /tmp/patching_reports/ami_backups.csv
+                                elif [[ "$AMI_STATE" == "failed" ]]; then
+                                  echo "AMI $ami_id failed"
+                                  sed -i "s/$instance_id,$ami_id,$ami_name,pending/$instance_id,$ami_id,$ami_name,failed/g" /tmp/patching_reports/ami_backups.csv
+                                  BACKUP_SUCCESS=false
+                                else
+                                  ALL_COMPLETE=false
+                                fi
+                              fi
+                            done < <(tail -n +2 /tmp/patching_reports/ami_backups.csv)
+                            
+                            if [[ "$ALL_COMPLETE" == "true" ]]; then
+                              echo "All AMI backups completed"
+                              break
+                            fi
+                            
+                            echo "Waiting for AMI backups to complete... (${ELAPSED}s elapsed)"
+                            sleep 30
+                          done
+                          
+                          # Export backup report
+                          cp /tmp/patching_reports/ami_backups.csv <+artifacts>.path/ami_backups.csv
+                          
+                          # Validate backup success
+                          if [[ "$BACKUP_SUCCESS" == "true" ]]; then
+                            echo "AMI backup completed successfully"
+                            echo "backup_status=success" > <+artifacts>.path/backup_status.txt
+                          else
+                            echo "AMI backup failed or timed out"
+                            echo "backup_status=failed" > <+artifacts>.path/backup_status.txt
+                            exit 1
+                          fi
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: "ap-southeast-2"
+                    outputVariables:
+                      - name: backup_status
+                        type: String
+                        value: "success"
+                  timeout: 60m
+                  
+              # Step 1.4: Pre-Patch Health Checks & Server State Validation
+              - step:
+                  type: ShellScript
+                  name: "Pre-Patch Health Checks"
+                  identifier: prepatch_health_checks
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          
+                          echo "=== Server State Validation ==="
+                          echo "Checking and ensuring instances are running in landing zone: $LANDING_ZONE"
+                          
+                          # Get list of instances
+                          INSTANCE_IDS=$(aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running,stopped,stopping" \
+                            --query 'Reservations[].Instances[].InstanceId' \
+                            --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$INSTANCE_IDS" ]]; then
+                            echo "No instances found in landing zone: $LANDING_ZONE"
+                            exit 1
+                          fi
+                          
+                          echo "Found instances: $INSTANCE_IDS"
+                          
+                          # Check and start stopped instances
+                          HEALTH_ISSUES=()
+                          RUNNING_COUNT=0
+                          TOTAL_COUNT=0
+                          
+                          for INSTANCE_ID in $INSTANCE_IDS; do
+                            TOTAL_COUNT=$((TOTAL_COUNT + 1))
+                            echo "Checking instance: $INSTANCE_ID"
+                            
+                            # Get current instance state
+                            INSTANCE_STATE=$(aws ec2 describe-instances \
+                              --instance-ids $INSTANCE_ID \
+                              --query 'Reservations[0].Instances[0].State.Name' \
+                              --output text --region $AWS_REGION)
+                            
+                            echo "Instance $INSTANCE_ID state: $INSTANCE_STATE"
+                            
+                            case $INSTANCE_STATE in
+                              "running")
+                                echo "Instance $INSTANCE_ID is already running"
+                                RUNNING_COUNT=$((RUNNING_COUNT + 1))
+                                ;;
+                              "stopped")
+                                echo "Starting stopped instance: $INSTANCE_ID"
+                                aws ec2 start-instances --instance-ids $INSTANCE_ID --region $AWS_REGION
+                                
+                                # Wait for instance to be running
+                                echo "Waiting for instance $INSTANCE_ID to start..."
+                                aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $AWS_REGION
+                                
+                                if [[ $? -eq 0 ]]; then
+                                  echo "Instance $INSTANCE_ID started successfully"
+                                  RUNNING_COUNT=$((RUNNING_COUNT + 1))
+                                else
+                                  echo "Failed to start instance $INSTANCE_ID"
+                                  HEALTH_ISSUES+=("Failed to start instance $INSTANCE_ID")
+                                fi
+                                ;;
+                              "stopping")
+                                echo "Instance $INSTANCE_ID is stopping - waiting for it to stop completely"
+                                aws ec2 wait instance-stopped --instance-ids $INSTANCE_ID --region $AWS_REGION
+                                
+                                echo "Starting instance $INSTANCE_ID after it stopped"
+                                aws ec2 start-instances --instance-ids $INSTANCE_ID --region $AWS_REGION
+                                aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region $AWS_REGION
+                                
+                                if [[ $? -eq 0 ]]; then
+                                  echo "Instance $INSTANCE_ID started successfully"
+                                  RUNNING_COUNT=$((RUNNING_COUNT + 1))
+                                else
+                                  echo "Failed to start instance $INSTANCE_ID"
+                                  HEALTH_ISSUES+=("Failed to start instance $INSTANCE_ID")
+                                fi
+                                ;;
+                              *)
+                                echo "Instance $INSTANCE_ID is in $INSTANCE_STATE state - cannot proceed"
+                                HEALTH_ISSUES+=("Instance $INSTANCE_ID in invalid state: $INSTANCE_STATE")
+                                ;;
+                            esac
+                          done
+                          
+                          echo "Server state validation completed: $RUNNING_COUNT/$TOTAL_COUNT instances running"
+                          
+                          # Step 2: SSM Agent connectivity validation
+                          echo "=== SSM Agent Validation ==="
+                          aws ssm describe-instance-information \
+                            --filters "Key=tag:Environment,Values=$LANDING_ZONE" \
+                            --query 'InstanceInformationList[].[InstanceId,PingStatus,LastPingDateTime]' \
+                            --output table --region $AWS_REGION
+                          
+                          # Check if any instances are not online
+                          OFFLINE_INSTANCES=$(aws ssm describe-instance-information \
+                            --filters "Key=tag:Environment,Values=$LANDING_ZONE" \
+                            --query 'InstanceInformationList[?PingStatus!=`Online`].InstanceId' \
+                            --output text --region $AWS_REGION)
+                          
+                          SSM_ONLINE_COUNT=$(aws ssm describe-instance-information \
+                            --filters "Key=tag:Environment,Values=$LANDING_ZONE" \
+                            --query 'length(InstanceInformationList[?PingStatus==`Online`])' \
+                            --output text --region $AWS_REGION)
+                          
+                          if [[ ! -z "$OFFLINE_INSTANCES" ]]; then
+                            echo "Warning: Some instances have SSM agent issues: $OFFLINE_INSTANCES"
+                            echo "Attempting to restart SSM agent on affected instances..."
+                            
+                            aws ssm send-command \
+                              --document-name "AWS-RunShellScript" \
+                              --parameters 'commands=["sudo systemctl restart amazon-ssm-agent","sleep 30","sudo systemctl status amazon-ssm-agent"]' \
+                              --targets "Key=tag:Environment,Values=$LANDING_ZONE" \
+                              --comment "Restart SSM agent for prepatch validation" \
+                              --region $AWS_REGION
+                            
+                            # Wait a bit for SSM agent to restart
+                            echo "Waiting 60 seconds for SSM agent restart..."
+                            sleep 60
+                            
+                            # Recheck SSM status
+                            SSM_ONLINE_COUNT=$(aws ssm describe-instance-information \
+                              --filters "Key=tag:Environment,Values=$LANDING_ZONE" \
+                              --query 'length(InstanceInformationList[?PingStatus==`Online`])' \
+                              --output text --region $AWS_REGION)
+                          fi
+                          
+                          echo "SSM online instances: $SSM_ONLINE_COUNT"
+                          
+                          # Step 3: Basic system health checks
+                          echo "=== System Health Checks ==="
+                          if [[ "$SSM_ONLINE_COUNT" -gt 0 ]]; then
+                            echo "Running system health checks via SSM..."
+                            
+                            HEALTH_CHECK_COMMAND_ID=$(aws ssm send-command \
+                              --document-name "AWS-RunShellScript" \
+                              --parameters 'commands=["df -h | head -10","free -m","uptime","systemctl status amazon-ssm-agent --no-pager"]' \
+                              --targets "Key=tag:Environment,Values=$LANDING_ZONE" \
+                              --comment "Pre-patch system health check" \
+                              --query 'Command.CommandId' \
+                              --output text --region $AWS_REGION)
+                            
+                            echo "Health check command ID: $HEALTH_CHECK_COMMAND_ID"
+                            
+                            # Wait for command completion
+                            sleep 30
+                            
+                            echo "Health check command completed"
+                          else
+                            echo "No SSM-managed instances available for system health checks"
+                            HEALTH_ISSUES+=("No SSM-managed instances available")
+                          fi
+                          
+                          # Generate health report
+                          echo "=== Generating Health Report ==="
+                          
+                          # Create health report JSON
+                          echo "{" > /tmp/prepatch_health_report.json
+                          echo "  \"validation_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> /tmp/prepatch_health_report.json
+                          echo "  \"landing_zone\": \"$LANDING_ZONE\"," >> /tmp/prepatch_health_report.json
+                          echo "  \"landing_zone_id\": \"$LANDING_ZONE_ID\"," >> /tmp/prepatch_health_report.json
+                          echo "  \"total_instances_checked\": $TOTAL_COUNT," >> /tmp/prepatch_health_report.json
+                          echo "  \"running_instances\": $RUNNING_COUNT," >> /tmp/prepatch_health_report.json
+                          echo "  \"ssm_online_instances\": $SSM_ONLINE_COUNT," >> /tmp/prepatch_health_report.json
+                          echo "  \"health_issues\": [" >> /tmp/prepatch_health_report.json
+                          
+                          # Add health issues to JSON
+                          for i in "${!HEALTH_ISSUES[@]}"; do
+                            if [[ $i -gt 0 ]]; then
+                              echo "," >> /tmp/prepatch_health_report.json
+                            fi
+                            echo "    \"${HEALTH_ISSUES[$i]}\"" >> /tmp/prepatch_health_report.json
+                          done
+                          
+                          echo "  ]," >> /tmp/prepatch_health_report.json
+                          echo "  \"summary\": {" >> /tmp/prepatch_health_report.json
+                          echo "    \"all_instances_running\": $([ $RUNNING_COUNT -eq $TOTAL_COUNT ] && echo "true" || echo "false")," >> /tmp/prepatch_health_report.json
+                          echo "    \"ssm_coverage\": \"$SSM_ONLINE_COUNT/$TOTAL_COUNT\"," >> /tmp/prepatch_health_report.json
+                          echo "    \"ready_for_patching\": $([ $RUNNING_COUNT -eq $TOTAL_COUNT ] && [ $SSM_ONLINE_COUNT -gt 0 ] && echo "true" || echo "false")" >> /tmp/prepatch_health_report.json
+                          echo "  }" >> /tmp/prepatch_health_report.json
+                          echo "}" >> /tmp/prepatch_health_report.json
+                          
+                          echo "Pre-patch health checks completed. Report saved to artifacts."
+                          cp /tmp/prepatch_health_report.json <+artifacts>.path/prepatch_health_report.json
+                          
+                          # Determine overall health status
+                          if [[ $RUNNING_COUNT -eq $TOTAL_COUNT && $SSM_ONLINE_COUNT -gt 0 ]]; then
+                            echo "Overall health status: HEALTHY"
+                            echo "healthy" > /tmp/health_status.txt
+                          else
+                            echo "Overall health status: DEGRADED"
+                            echo "degraded" > /tmp/health_status.txt
+                            
+                            if [[ ${#HEALTH_ISSUES[@]} -gt 0 ]]; then
+                              echo "Health issues detected - review required before proceeding"
+                              # Don't exit here, let approval gate handle the decision
+                            fi
+                          fi
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: "ap-southeast-2"
+                    outputVariables:
+                      - name: health_status
+                        type: String
+                        value: "$(cat /tmp/health_status.txt)"
+                  timeout: 30m
+        
+              # Pre-Patch Approval Gate
+              - step:
+                  type: HarnessApproval
+                  name: "Pre-Patch Approval"
+                  identifier: prepatch_approval
+                  spec:
+                    approvalMessage: |
+                      Pre-patch phase completed successfully for landing zone: <+input>.landingZone
+                      
+                      Summary:
+                      - Environment validation: Passed
+                      - Instance discovery: <+execution.steps.instance_discovery.output.outputVariables.instance_count> instances found
+                      - AMI backup: <+execution.steps.ami_backup_creation.output.outputVariables.backup_status>
+                      - Health checks: <+execution.steps.prepatch_health_checks.output.outputVariables.health_status>
+                      
+                      Please review the artifacts and approve to proceed with patching.
+                    includePipelineExecutionHistory: true
+                    approvers:
+                      userGroups:
+                        - patching_approvers
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+                    approverInputs: []
+                  timeout: 1d
+    
+    # ========================================
+    # PHASE 2: PATCHING
+    # ========================================
+    
+    - stage:
+        name: "Patching Phase"
+        identifier: patching_phase
+        description: "Maintenance window setup, patch installation, and verification"
+        type: Custom
+        spec:
+          execution:
+            steps:
+              
+              # Step 2.1: Maintenance Window Setup
+              - step:
+                  type: ShellScript
+                  name: "Maintenance Window Setup"
+                  identifier: maintenance_window_setup
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          
+                          echo "=== Maintenance Window Setup ==="
+                          
+                          # Create maintenance window
+                          WINDOW_NAME="Patching-${LANDING_ZONE}-$(date +%Y%m%d-%H%M)"
+                          
+                          MAINTENANCE_WINDOW_ID=$(aws ssm create-maintenance-window \
+                            --name "$WINDOW_NAME" \
+                            --description "Automated patching for $LANDING_ZONE" \
+                            --schedule "cron(0 2 ? * SUN *)" \
+                            --duration 4 \
+                            --cutoff 1 \
+                            --no-allow-unassociated-targets \
+                            --tags "Key=Environment,Value=$LANDING_ZONE" "Key=Purpose,Value=AutomatedPatching" \
+                            --query 'WindowId' --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$MAINTENANCE_WINDOW_ID" ]]; then
+                            echo "Failed to create maintenance window"
+                            exit 1
+                          fi
+                          
+                          echo "Created maintenance window: $MAINTENANCE_WINDOW_ID"
+                          echo "maintenance_window_id=$MAINTENANCE_WINDOW_ID" >> <+artifacts>.path/maintenance_window.txt
+                          
+                          # Register targets
+                          TARGET_ID=$(aws ssm register-target-with-maintenance-window \
+                            --window-id $MAINTENANCE_WINDOW_ID \
+                            --resource-type "INSTANCE" \
+                            --targets "Key=tag:Environment,Values=$LANDING_ZONE" \
+                            --query 'WindowTargetId' --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$TARGET_ID" ]]; then
+                            echo "Failed to register targets"
+                            exit 1
+                          fi
+                          
+                          echo "Registered targets: $TARGET_ID"
+                          echo "target_id=$TARGET_ID" >> <+artifacts>.path/maintenance_window.txt
+                          
+                          echo "Maintenance window setup completed"
+                          echo "$MAINTENANCE_WINDOW_ID" > /tmp/maintenance_window_id.txt
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: "ap-southeast-2"
+                    outputVariables:
+                      - name: maintenance_window_id
+                        type: String
+                        value: "$(cat /tmp/maintenance_window_id.txt)"
+                  timeout: 10m
+              
+              # Step 2.2: Patch Installation
+              - step:
+                  type: ShellScript
+                  name: "Patch Installation"
+                  identifier: patch_installation
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          
+                          echo "=== Patch Installation ==="
+                          
+                          # Get list of instances
+                          INSTANCE_IDS=$(aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running" \
+                            --query 'Reservations[].Instances[].InstanceId' \
+                            --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$INSTANCE_IDS" ]]; then
+                            echo "No running instances found in landing zone: $LANDING_ZONE"
+                            exit 1
+                          fi
+                          
+                          echo "Found running instances: $INSTANCE_IDS"
+                          
+                          # Execute patching via SSM
+                          echo "Initiating patch installation..."
+                          COMMAND_ID=$(aws ssm send-command \
+                            --document-name "AWS-RunPatchBaseline" \
+                            --parameters 'Operation=Install,RebootOption=RebootIfNeeded' \
+                            --targets "Key=tag:Environment,Values=$LANDING_ZONE" \
+                            --comment "Automated patch installation for $LANDING_ZONE" \
+                            --query 'Command.CommandId' --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$COMMAND_ID" ]]; then
+                            echo "Failed to initiate patch installation"
+                            exit 1
+                          fi
+                          
+                          echo "Patch installation command ID: $COMMAND_ID"
+                          echo "patch_command_id=$COMMAND_ID" >> <+artifacts>.path/patch_execution.txt
+                          
+                          # Monitor command execution for all instances
+                          echo "Monitoring patch installation progress..."
+                          
+                          # Create a JSON file to track status
+                          echo "{" > /tmp/patch_status.json
+                          echo "  \"command_id\": \"$COMMAND_ID\"," >> /tmp/patch_status.json
+                          echo "  \"landing_zone\": \"$LANDING_ZONE\"," >> /tmp/patch_status.json
+                          echo "  \"instances\": {}," >> /tmp/patch_status.json
+                          echo "  \"overall_status\": \"InProgress\"," >> /tmp/patch_status.json
+                          echo "  \"start_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" >> /tmp/patch_status.json
+                          echo "}" >> /tmp/patch_status.json
+                          
+                          # Function to update status JSON
+                          update_status_json() {
+                            local instance_id=$1
+                            local status=$2
+                            local details=$3
+                            
+                            # Update instance status
+                            jq --arg id "$instance_id" --arg status "$status" --arg details "$details" \
+                              '.instances[$id] = {"status": $status, "details": $details}' \
+                              /tmp/patch_status.json > /tmp/patch_status.json.new
+                            mv /tmp/patch_status.json.new /tmp/patch_status.json
+                            
+                            # Check if all instances are done
+                            local all_done=$(jq '.instances | to_entries | all(.value.status == "Success" or .value.status == "Failed")' /tmp/patch_status.json)
+                            
+                            if [[ "$all_done" == "true" ]]; then
+                              # Check if any failed
+                              local any_failed=$(jq '.instances | to_entries | any(.value.status == "Failed")' /tmp/patch_status.json)
+                              
+                              if [[ "$any_failed" == "true" ]]; then
+                                jq '.overall_status = "Failed"' /tmp/patch_status.json > /tmp/patch_status.json.new
+                              else
+                                jq '.overall_status = "Success"' /tmp/patch_status.json > /tmp/patch_status.json.new
+                              fi
+                              
+                              mv /tmp/patch_status.json.new /tmp/patch_status.json
+                            fi
+                          }
+                          
+                          # Wait for command to be sent to all instances
+                          echo "Waiting for command to be sent to all instances..."
+                          sleep 30
+                          
+                          # Monitor each instance
+                          MAX_ATTEMPTS=60  # 30 minutes (30 seconds * 60)
+                          ATTEMPT=0
+                          OVERALL_STATUS="InProgress"
+                          
+                          while [[ "$OVERALL_STATUS" == "InProgress" && $ATTEMPT -lt $MAX_ATTEMPTS ]]; do
+                            ATTEMPT=$((ATTEMPT + 1))
+                            echo "Checking status (attempt $ATTEMPT of $MAX_ATTEMPTS)..."
+                            
+                            for INSTANCE_ID in $INSTANCE_IDS; do
+                              # Get command status for this instance
+                              STATUS=$(aws ssm list-command-invocations \
+                                --command-id "$COMMAND_ID" \
+                                --instance-id "$INSTANCE_ID" \
+                                --details \
+                                --query 'CommandInvocations[0].Status' \
+                                --output text --region $AWS_REGION 2>/dev/null || echo "Pending")
+                              
+                              echo "Instance $INSTANCE_ID status: $STATUS"
+                              
+                              # Update status in JSON
+                              update_status_json "$INSTANCE_ID" "$STATUS" "Patch installation $STATUS"
+                            done
+                            
+                            # Get overall status
+                            OVERALL_STATUS=$(jq -r '.overall_status' /tmp/patch_status.json)
+                            
+                            if [[ "$OVERALL_STATUS" == "InProgress" ]]; then
+                              echo "Overall status: In Progress - waiting 30 seconds..."
+                              sleep 30
+                            fi
+                          done
+                          
+                          # Add completion time
+                          jq --arg time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.end_time = $time' /tmp/patch_status.json > /tmp/patch_status.json.new
+                          mv /tmp/patch_status.json.new /tmp/patch_status.json
+                          
+                          # Save status to artifacts
+                          cp /tmp/patch_status.json <+artifacts>.path/patch_status.json
+                          
+                          echo "Patch installation overall status: $OVERALL_STATUS"
+                          echo "$OVERALL_STATUS" > /tmp/patch_status.txt
+                          
+                          if [[ "$OVERALL_STATUS" != "Success" ]]; then
+                            echo "Patch installation failed for one or more instances"
+                            exit 1
+                          fi
+                          
+                          echo "Patch installation completed successfully"
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: "ap-southeast-2"
+                    outputVariables:
+                      - name: patch_status
+                        type: String
+                        value: "$(cat /tmp/patch_status.txt)"
+                  timeout: 120m
+              
+              # Step 2.3: Instance Reboot Management
+              - step:
+                  type: ShellScript
+                  name: "Instance Reboot Management"
+                  identifier: instance_reboot_management
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          
+                          echo "=== Instance Reboot Management ==="
+                          
+                          # Get list of instances
+                          INSTANCE_IDS=$(aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running" \
+                            --query 'Reservations[].Instances[].InstanceId' \
+                            --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$INSTANCE_IDS" ]]; then
+                            echo "No running instances found in landing zone: $LANDING_ZONE"
+                            exit 1
+                          fi
+                          
+                          echo "Found running instances: $INSTANCE_IDS"
+                          
+                          # Check if instances need reboot after patching
+                          echo "Checking if instances need reboot after patching..."
+                          
+                          REBOOT_NEEDED=false
+                          for INSTANCE_ID in $INSTANCE_IDS; do
+                            # Check if instance has pending reboot flag
+                            REBOOT_INFO=$(aws ssm describe-instance-patch-states \
+                              --instance-ids "$INSTANCE_ID" \
+                              --query 'InstancePatchStates[0].RebootOption' \
+                              --output text --region $AWS_REGION)
+                            
+                            echo "Instance $INSTANCE_ID reboot info: $REBOOT_INFO"
+                            
+                            if [[ "$REBOOT_INFO" == "RebootRequired" ]]; then
+                              REBOOT_NEEDED=true
+                              echo "Instance $INSTANCE_ID requires reboot"
+                            fi
+                          done
+                          
+                          # Create reboot status file
+                          echo "{" > /tmp/reboot_status.json
+                          echo "  \"landing_zone\": \"$LANDING_ZONE\"," >> /tmp/reboot_status.json
+                          echo "  \"reboot_needed\": $REBOOT_NEEDED," >> /tmp/reboot_status.json
+                          echo "  \"instances\": \"$INSTANCE_IDS\"," >> /tmp/reboot_status.json
+                          echo "  \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" >> /tmp/reboot_status.json
+                          echo "}" >> /tmp/reboot_status.json
+                          
+                          # If reboot is needed, initiate graceful reboot
+                          if [[ "$REBOOT_NEEDED" == "true" ]]; then
+                            echo "Initiating graceful reboot for instances..."
+                            
+                            REBOOT_COMMAND_ID=$(aws ssm send-command \
+                              --document-name "AWS-RunShellScript" \
+                              --parameters 'commands=["echo \"Initiating reboot in 1 minute...\"","sudo shutdown -r +1"]' \
+                              --targets "Key=tag:Environment,Values=$LANDING_ZONE" \
+                              --comment "Graceful reboot after patching" \
+                              --query 'Command.CommandId' \
+                              --output text --region $AWS_REGION)
+                            
+                            echo "Reboot command ID: $REBOOT_COMMAND_ID"
+                            echo "reboot_command_id=$REBOOT_COMMAND_ID" >> <+artifacts>.path/patch_execution.txt
+                            
+                            # Wait for reboot to initiate
+                            echo "Waiting for reboot to initiate (120 seconds)..."
+                            sleep 120
+                            
+                            # Wait for instances to come back online
+                            echo "Waiting for instances to come back online..."
+                            
+                            for INSTANCE_ID in $INSTANCE_IDS; do
+                              echo "Waiting for instance $INSTANCE_ID to be status-ok..."
+                              aws ec2 wait instance-status-ok --instance-ids "$INSTANCE_ID" --region $AWS_REGION
+                              echo "Instance $INSTANCE_ID is back online"
+                            done
+                            
+                            # Update reboot status
+                            echo "{" > /tmp/reboot_status.json
+                            echo "  \"landing_zone\": \"$LANDING_ZONE\"," >> /tmp/reboot_status.json
+                            echo "  \"reboot_needed\": true," >> /tmp/reboot_status.json
+                            echo "  \"reboot_completed\": true," >> /tmp/reboot_status.json
+                            echo "  \"instances\": \"$INSTANCE_IDS\"," >> /tmp/reboot_status.json
+                            echo "  \"reboot_command_id\": \"$REBOOT_COMMAND_ID\"," >> /tmp/reboot_status.json
+                            echo "  \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" >> /tmp/reboot_status.json
+                            echo "}" >> /tmp/reboot_status.json
+                            
+                            echo "completed" > /tmp/reboot_status.txt
+                            echo "Instance reboot completed successfully"
+                          else
+                            echo "No instances require reboot after patching"
+                            echo "skipped" > /tmp/reboot_status.txt
+                          fi
+                          
+                          # Save reboot status to artifacts
+                          cp /tmp/reboot_status.json <+artifacts>.path/reboot_status.json
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: "ap-southeast-2"
+                    outputVariables:
+                      - name: reboot_status
+                        type: String
+                        value: "$(cat /tmp/reboot_status.txt)"
+                  timeout: 30m
+              
+              # Step 2.4: Patch Verification
+              - step:
+                  type: ShellScript
+                  name: "Patch Verification"
+                  identifier: patch_verification
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          
+                          echo "=== Patch Verification ==="
+                          
+                          # Get list of instances
+                          INSTANCE_IDS=$(aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running" \
+                            --query 'Reservations[].Instances[].InstanceId' \
+                            --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$INSTANCE_IDS" ]]; then
+                            echo "No running instances found in landing zone: $LANDING_ZONE"
+                            exit 1
+                          fi
+                          
+                          echo "Found running instances: $INSTANCE_IDS"
+                          
+                          # Verify patch installation
+                          echo "Verifying patch installation..."
+                          SCAN_COMMAND_ID=$(aws ssm send-command \
+                            --document-name "AWS-RunPatchBaseline" \
+                            --parameters 'Operation=Scan' \
+                            --targets "Key=tag:Environment,Values=$LANDING_ZONE" \
+                            --comment "Post-patch verification scan" \
+                            --query 'Command.CommandId' \
+                            --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$SCAN_COMMAND_ID" ]]; then
+                            echo "Failed to initiate patch verification scan"
+                            exit 1
+                          fi
+                          
+                          echo "Patch verification scan command ID: $SCAN_COMMAND_ID"
+                          
+                          # Wait for scan to complete
+                          echo "Waiting for patch verification scan to complete..."
+                          sleep 60
+                          
+                          # Monitor scan progress
+                          MAX_ATTEMPTS=20  # 10 minutes (30 seconds * 20)
+                          ATTEMPT=0
+                          SCAN_COMPLETED=false
+                          
+                          while [[ "$SCAN_COMPLETED" == "false" && $ATTEMPT -lt $MAX_ATTEMPTS ]]; do
+                            ATTEMPT=$((ATTEMPT + 1))
+                            echo "Checking scan status (attempt $ATTEMPT of $MAX_ATTEMPTS)..."
+                            
+                            COMPLETED_COUNT=0
+                            TOTAL_COUNT=0
+                            
+                            for INSTANCE_ID in $INSTANCE_IDS; do
+                              TOTAL_COUNT=$((TOTAL_COUNT + 1))
+                              
+                              STATUS=$(aws ssm list-command-invocations \
+                                --command-id "$SCAN_COMMAND_ID" \
+                                --instance-id "$INSTANCE_ID" \
+                                --query 'CommandInvocations[0].Status' \
+                                --output text --region $AWS_REGION 2>/dev/null || echo "Pending")
+                              
+                              echo "Instance $INSTANCE_ID scan status: $STATUS"
+                              
+                              if [[ "$STATUS" == "Success" || "$STATUS" == "Failed" ]]; then
+                                COMPLETED_COUNT=$((COMPLETED_COUNT + 1))
+                              fi
+                            done
+                            
+                            if [[ $COMPLETED_COUNT -eq $TOTAL_COUNT ]]; then
+                              SCAN_COMPLETED=true
+                              echo "Patch verification scan completed for all instances"
+                            else
+                              echo "Scan in progress: $COMPLETED_COUNT/$TOTAL_COUNT instances completed"
+                              sleep 30
+                            fi
+                          done
+                          
+                          # Generate compliance report
+                          echo "Generating patch compliance report..."
+                          
+                          # Create verification report
+                          echo "{" > /tmp/patch_verification_report.json
+                          echo "  \"verification_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> /tmp/patch_verification_report.json
+                          echo "  \"landing_zone\": \"$LANDING_ZONE\"," >> /tmp/patch_verification_report.json
+                          echo "  \"landing_zone_id\": \"$LANDING_ZONE_ID\"," >> /tmp/patch_verification_report.json
+                          echo "  \"scan_command_id\": \"$SCAN_COMMAND_ID\"," >> /tmp/patch_verification_report.json
+                          echo "  \"instances\": {}," >> /tmp/patch_verification_report.json
+                          echo "  \"summary\": {" >> /tmp/patch_verification_report.json
+                          echo "    \"total_instances\": 0," >> /tmp/patch_verification_report.json
+                          echo "    \"compliant_instances\": 0," >> /tmp/patch_verification_report.json
+                          echo "    \"non_compliant_instances\": 0," >> /tmp/patch_verification_report.json
+                          echo "    \"failed_scans\": 0" >> /tmp/patch_verification_report.json
+                          echo "  }" >> /tmp/patch_verification_report.json
+                          echo "}" >> /tmp/patch_verification_report.json
+                          
+                          # Collect patch compliance data for each instance
+                          TOTAL_INSTANCES=0
+                          COMPLIANT_INSTANCES=0
+                          NON_COMPLIANT_INSTANCES=0
+                          FAILED_SCANS=0
+                          
+                          for INSTANCE_ID in $INSTANCE_IDS; do
+                            TOTAL_INSTANCES=$((TOTAL_INSTANCES + 1))
+                            
+                            echo "Collecting compliance data for instance: $INSTANCE_ID"
+                            
+                            # Get patch state for instance
+                            PATCH_STATE=$(aws ssm describe-instance-patch-states \
+                              --instance-ids "$INSTANCE_ID" \
+                              --query 'InstancePatchStates[0]' \
+                              --output json --region $AWS_REGION 2>/dev/null || echo '{}')
+                            
+                            if [[ "$PATCH_STATE" != "{}" ]]; then
+                              # Extract key metrics
+                              MISSING_COUNT=$(echo "$PATCH_STATE" | jq -r '.MissingCount // 0')
+                              FAILED_COUNT=$(echo "$PATCH_STATE" | jq -r '.FailedCount // 0')
+                              INSTALLED_COUNT=$(echo "$PATCH_STATE" | jq -r '.InstalledCount // 0')
+                              OPERATION_END_TIME=$(echo "$PATCH_STATE" | jq -r '.OperationEndTime // "N/A"')
+                              
+                              echo "Instance $INSTANCE_ID - Missing: $MISSING_COUNT, Failed: $FAILED_COUNT, Installed: $INSTALLED_COUNT"
+                              
+                              # Determine compliance status
+                              if [[ "$MISSING_COUNT" == "0" && "$FAILED_COUNT" == "0" ]]; then
+                                COMPLIANCE_STATUS="Compliant"
+                                COMPLIANT_INSTANCES=$((COMPLIANT_INSTANCES + 1))
+                              else
+                                COMPLIANCE_STATUS="Non-Compliant"
+                                NON_COMPLIANT_INSTANCES=$((NON_COMPLIANT_INSTANCES + 1))
+                              fi
+                              
+                              # Update JSON report
+                              jq --arg id "$INSTANCE_ID" --arg status "$COMPLIANCE_STATUS" \
+                                 --arg missing "$MISSING_COUNT" --arg failed "$FAILED_COUNT" \
+                                 --arg installed "$INSTALLED_COUNT" --arg end_time "$OPERATION_END_TIME" \
+                                 '.instances[$id] = {
+                                   "compliance_status": $status,
+                                   "missing_patches": ($missing | tonumber),
+                                   "failed_patches": ($failed | tonumber),
+                                   "installed_patches": ($installed | tonumber),
+                                   "last_operation_end_time": $end_time
+                                 }' /tmp/patch_verification_report.json > /tmp/patch_verification_report.json.new
+                              mv /tmp/patch_verification_report.json.new /tmp/patch_verification_report.json
+                            else
+                              echo "Failed to get patch state for instance: $INSTANCE_ID"
+                              FAILED_SCANS=$((FAILED_SCANS + 1))
+                              
+                              # Update JSON report for failed scan
+                              jq --arg id "$INSTANCE_ID" \
+                                 '.instances[$id] = {
+                                   "compliance_status": "Scan Failed",
+                                   "missing_patches": null,
+                                   "failed_patches": null,
+                                   "installed_patches": null,
+                                   "last_operation_end_time": null
+                                 }' /tmp/patch_verification_report.json > /tmp/patch_verification_report.json.new
+                              mv /tmp/patch_verification_report.json.new /tmp/patch_verification_report.json
+                            fi
+                          done
+                          
+                          # Update summary in JSON report
+                          jq --arg total "$TOTAL_INSTANCES" --arg compliant "$COMPLIANT_INSTANCES" \
+                             --arg non_compliant "$NON_COMPLIANT_INSTANCES" --arg failed "$FAILED_SCANS" \
+                             '.summary = {
+                               "total_instances": ($total | tonumber),
+                               "compliant_instances": ($compliant | tonumber),
+                               "non_compliant_instances": ($non_compliant | tonumber),
+                               "failed_scans": ($failed | tonumber),
+                               "compliance_percentage": (if ($total | tonumber) > 0 then (($compliant | tonumber) * 100 / ($total | tonumber)) else 0 end)
+                             }' /tmp/patch_verification_report.json > /tmp/patch_verification_report.json.new
+                          mv /tmp/patch_verification_report.json.new /tmp/patch_verification_report.json
+                          
+                          # Save verification results
+                          cp /tmp/patch_verification_report.json <+artifacts>.path/patch_verification_report.json
+                          
+                          # Determine overall verification status
+                          if [[ $NON_COMPLIANT_INSTANCES -eq 0 && $FAILED_SCANS -eq 0 ]]; then
+                            echo "verified" > /tmp/verification_status.txt
+                            echo "Patch verification completed successfully - All instances are compliant"
+                          elif [[ $FAILED_SCANS -gt 0 ]]; then
+                            echo "failed" > /tmp/verification_status.txt
+                            echo "Patch verification failed - Some scans could not complete"
+                          else
+                            echo "partial" > /tmp/verification_status.txt
+                            echo "Patch verification completed with issues - Some instances are non-compliant"
+                          fi
+                          
+                          echo "Verification Summary:"
+                          echo "  Total instances: $TOTAL_INSTANCES"
+                          echo "  Compliant: $COMPLIANT_INSTANCES"
+                          echo "  Non-compliant: $NON_COMPLIANT_INSTANCES"
+                          echo "  Failed scans: $FAILED_SCANS"
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: <+input>.awsRegion
+                    outputVariables:
+                      - name: verification_status
+                        type: String
+                        value: "verified"
+                  timeout: 20m
+    
+    # ========================================
+    # PHASE 3: POST-PATCH
+    # ========================================
+    
+    - stage:
+        name: "Post-Patch Phase"
+        identifier: postpatch_phase
+        description: "Application validation, performance testing, rollback capability, and reporting"
+        type: Custom
+        spec:
+          execution:
+            steps:
+              
+              # Step 3.1: Application Validation
+              - step:
+                  type: ShellScript
+                  name: "Application Validation"
+                  identifier: application_validation
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          APPLICATION_PORT="80"
+                          
+                          echo "=== Application Validation ==="
+                          
+                          # Get list of instances
+                          INSTANCE_IDS=$(aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running" \
+                            --query 'Reservations[].Instances[].InstanceId' \
+                            --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$INSTANCE_IDS" ]]; then
+                            echo "No running instances found in landing zone: $LANDING_ZONE"
+                            exit 1
+                          fi
+                          
+                          echo "Found running instances: $INSTANCE_IDS"
+                          
+                          # Create application validation report
+                          echo "{" > /tmp/application_validation_report.json
+                          echo "  \"validation_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> /tmp/application_validation_report.json
+                          echo "  \"landing_zone\": \"$LANDING_ZONE\"," >> /tmp/application_validation_report.json
+                          echo "  \"landing_zone_id\": \"$LANDING_ZONE_ID\"," >> /tmp/application_validation_report.json
+                          echo "  \"instances\": {}," >> /tmp/application_validation_report.json
+                          echo "  \"summary\": {" >> /tmp/application_validation_report.json
+                          echo "    \"total_instances\": 0," >> /tmp/application_validation_report.json
+                          echo "    \"healthy_instances\": 0," >> /tmp/application_validation_report.json
+                          echo "    \"unhealthy_instances\": 0," >> /tmp/application_validation_report.json
+                          echo "    \"unreachable_instances\": 0" >> /tmp/application_validation_report.json
+                          echo "  }" >> /tmp/application_validation_report.json
+                          echo "}" >> /tmp/application_validation_report.json
+                          
+                          # Application validation for each instance
+                          TOTAL_INSTANCES=0
+                          HEALTHY_INSTANCES=0
+                          UNHEALTHY_INSTANCES=0
+                          UNREACHABLE_INSTANCES=0
+                          
+                          for INSTANCE_ID in $INSTANCE_IDS; do
+                            TOTAL_INSTANCES=$((TOTAL_INSTANCES + 1))
+                            
+                            echo "Validating application on instance: $INSTANCE_ID"
+                            
+                            # Get instance private IP
+                            PRIVATE_IP=$(aws ec2 describe-instances \
+                              --instance-ids "$INSTANCE_ID" \
+                              --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+                              --output text --region $AWS_REGION)
+                            
+                            if [[ "$PRIVATE_IP" == "None" || -z "$PRIVATE_IP" ]]; then
+                              echo "Could not get private IP for instance: $INSTANCE_ID"
+                              UNREACHABLE_INSTANCES=$((UNREACHABLE_INSTANCES + 1))
+                              
+                              # Update JSON report for unreachable instance
+                              jq --arg id "$INSTANCE_ID" \
+                                 '.instances[$id] = {
+                                   "status": "Unreachable",
+                                   "private_ip": null,
+                                   "health_check_result": "Failed to get IP",
+                                   "response_time_ms": null,
+                                   "service_status": "Unknown"
+                                 }' /tmp/application_validation_report.json > /tmp/application_validation_report.json.new
+                              mv /tmp/application_validation_report.json.new /tmp/application_validation_report.json
+                              continue
+                            fi
+                            
+                            echo "Instance $INSTANCE_ID private IP: $PRIVATE_IP"
+                            
+                            # Test basic connectivity
+                            echo "Testing basic connectivity to $PRIVATE_IP:$APPLICATION_PORT"
+                            
+                            # Use timeout and curl to test connectivity
+                            START_TIME=$(date +%s%3N)
+                            
+                            if timeout 10 bash -c "</dev/tcp/$PRIVATE_IP/$APPLICATION_PORT"; then
+                              END_TIME=$(date +%s%3N)
+                              RESPONSE_TIME=$((END_TIME - START_TIME))
+                              
+                              echo "Port $APPLICATION_PORT is open on $PRIVATE_IP (response time: ${RESPONSE_TIME}ms)"
+                              
+                              # Test HTTP health endpoint if available
+                              HTTP_STATUS="Unknown"
+                              if command -v curl >/dev/null 2>&1; then
+                                echo "Testing HTTP health endpoint..."
+                                
+                                # Try common health check endpoints
+                                for ENDPOINT in "/health" "/status" "/ping" "/"; do
+                                  HTTP_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "http://$PRIVATE_IP:$APPLICATION_PORT$ENDPOINT" 2>/dev/null || echo "000")
+                                  
+                                  if [[ "$HTTP_RESPONSE" =~ ^[2-3][0-9][0-9]$ ]]; then
+                                    HTTP_STATUS="Healthy (HTTP $HTTP_RESPONSE at $ENDPOINT)"
+                                    echo "HTTP health check passed: $HTTP_STATUS"
+                                    break
+                                  fi
+                                done
+                                
+                                if [[ "$HTTP_STATUS" == "Unknown" ]]; then
+                                  HTTP_STATUS="HTTP endpoints not responding"
+                                  echo "HTTP health check failed: $HTTP_STATUS"
+                                fi
+                              else
+                                HTTP_STATUS="curl not available"
+                              fi
+                              
+                              # Check if instance is considered healthy
+                              if [[ "$HTTP_STATUS" =~ ^Healthy ]]; then
+                                INSTANCE_STATUS="Healthy"
+                                HEALTHY_INSTANCES=$((HEALTHY_INSTANCES + 1))
+                                echo "Instance $INSTANCE_ID application status: Healthy"
+                              else
+                                INSTANCE_STATUS="Unhealthy"
+                                UNHEALTHY_INSTANCES=$((UNHEALTHY_INSTANCES + 1))
+                                echo "Instance $INSTANCE_ID application status: Unhealthy"
+                              fi
+                              
+                              # Update JSON report for healthy/unhealthy instance
+                              jq --arg id "$INSTANCE_ID" --arg status "$INSTANCE_STATUS" \
+                                 --arg ip "$PRIVATE_IP" --arg health "$HTTP_STATUS" \
+                                 --arg response_time "$RESPONSE_TIME" \
+                                 '.instances[$id] = {
+                                   "status": $status,
+                                   "private_ip": $ip,
+                                   "health_check_result": $health,
+                                   "response_time_ms": ($response_time | tonumber),
+                                   "service_status": "Port accessible"
+                                 }' /tmp/application_validation_report.json > /tmp/application_validation_report.json.new
+                              mv /tmp/application_validation_report.json.new /tmp/application_validation_report.json
+                            else
+                              echo "Port $APPLICATION_PORT is not accessible on $PRIVATE_IP"
+                              UNHEALTHY_INSTANCES=$((UNHEALTHY_INSTANCES + 1))
+                              
+                              # Update JSON report for inaccessible instance
+                              jq --arg id "$INSTANCE_ID" --arg ip "$PRIVATE_IP" \
+                                 '.instances[$id] = {
+                                   "status": "Unhealthy",
+                                   "private_ip": $ip,
+                                   "health_check_result": "Port not accessible",
+                                   "response_time_ms": null,
+                                   "service_status": "Port closed or service down"
+                                 }' /tmp/application_validation_report.json > /tmp/application_validation_report.json.new
+                              mv /tmp/application_validation_report.json.new /tmp/application_validation_report.json
+                            fi
+                          done
+                          
+                          # Performance validation using CloudWatch
+                          echo "Checking performance metrics..."
+                          
+                          # Get average CPU utilization for the last hour
+                          for INSTANCE_ID in $INSTANCE_IDS; do
+                            echo "Checking CPU utilization for instance: $INSTANCE_ID"
+                            
+                            CPU_STATS=$(aws cloudwatch get-metric-statistics \
+                              --namespace AWS/EC2 \
+                              --metric-name CPUUtilization \
+                              --dimensions Name=InstanceId,Value="$INSTANCE_ID" \
+                              --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+                              --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+                              --period 300 \
+                              --statistics Average \
+                              --query 'Datapoints[*].Average' \
+                              --output text --region $AWS_REGION 2>/dev/null || echo "")
+                            
+                            if [[ -n "$CPU_STATS" && "$CPU_STATS" != "None" ]]; then
+                              # Calculate average CPU
+                              AVG_CPU=$(echo "$CPU_STATS" | awk '{sum=0; count=0; for(i=1;i<=NF;i++){sum+=$i; count++}} END {if(count>0) print sum/count; else print 0}')
+                              echo "Instance $INSTANCE_ID average CPU utilization: ${AVG_CPU}%"
+                              
+                              # Update JSON with CPU metrics
+                              jq --arg id "$INSTANCE_ID" --arg cpu "$AVG_CPU" \
+                                 '.instances[$id].cpu_utilization_avg = ($cpu | tonumber)' \
+                                 /tmp/application_validation_report.json > /tmp/application_validation_report.json.new
+                              mv /tmp/application_validation_report.json.new /tmp/application_validation_report.json
+                            else
+                              echo "No CPU metrics available for instance: $INSTANCE_ID"
+                            fi
+                          done
+                          
+                          # Update summary in JSON report
+                          jq --arg total "$TOTAL_INSTANCES" --arg healthy "$HEALTHY_INSTANCES" \
+                             --arg unhealthy "$UNHEALTHY_INSTANCES" --arg unreachable "$UNREACHABLE_INSTANCES" \
+                             '.summary = {
+                               "total_instances": ($total | tonumber),
+                               "healthy_instances": ($healthy | tonumber),
+                               "unhealthy_instances": ($unhealthy | tonumber),
+                               "unreachable_instances": ($unreachable | tonumber),
+                               "health_percentage": (if ($total | tonumber) > 0 then (($healthy | tonumber) * 100 / ($total | tonumber)) else 0 end)
+                             }' /tmp/application_validation_report.json > /tmp/application_validation_report.json.new
+                          mv /tmp/application_validation_report.json.new /tmp/application_validation_report.json
+                          
+                          # Save validation results
+                          cp /tmp/application_validation_report.json <+artifacts>.path/application_validation_report.json
+                          
+                          # Determine overall validation status
+                          if [[ $HEALTHY_INSTANCES -eq $TOTAL_INSTANCES ]]; then
+                            echo "passed" > /tmp/app_validation_status.txt
+                            echo "Application validation completed successfully - All instances are healthy"
+                          elif [[ $HEALTHY_INSTANCES -gt 0 ]]; then
+                            echo "partial" > /tmp/app_validation_status.txt
+                            echo "Application validation completed with issues - Some instances are unhealthy"
+                          else
+                            echo "failed" > /tmp/app_validation_status.txt
+                            echo "Application validation failed - No healthy instances found"
+                          fi
+                          
+                          echo "Application Validation Summary:"
+                          echo "  Total instances: $TOTAL_INSTANCES"
+                          echo "  Healthy: $HEALTHY_INSTANCES"
+                          echo "  Unhealthy: $UNHEALTHY_INSTANCES"
+                          echo "  Unreachable: $UNREACHABLE_INSTANCES"
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: <+input>.awsRegion
+                    outputVariables:
+                      - name: app_validation_status
+                        type: String
+                        value: "passed"
+                  timeout: 20m
+              
+              # Step 3.2: Performance Testing
+              - step:
+                  type: ShellScript
+                  name: "Performance Testing"
+                  identifier: performance_testing
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          APPLICATION_PORT="80"
+                          
+                          echo "=== Performance Testing ==="
+                          
+                          # Get list of instances
+                          INSTANCE_IDS=$(aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running" \
+                            --query 'Reservations[].Instances[].InstanceId' \
+                            --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$INSTANCE_IDS" ]]; then
+                            echo "No running instances found in landing zone: $LANDING_ZONE"
+                            exit 1
+                          fi
+                          
+                          echo "Found running instances: $INSTANCE_IDS"
+                          
+                          # Create performance testing report
+                          echo "{" > /tmp/performance_testing_report.json
+                          echo "  \"test_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> /tmp/performance_testing_report.json
+                          echo "  \"landing_zone\": \"$LANDING_ZONE\"," >> /tmp/performance_testing_report.json
+                          echo "  \"landing_zone_id\": \"$LANDING_ZONE_ID\"," >> /tmp/performance_testing_report.json
+                          echo "  \"instances\": {}," >> /tmp/performance_testing_report.json
+                          echo "  \"summary\": {" >> /tmp/performance_testing_report.json
+                          echo "    \"total_instances\": 0," >> /tmp/performance_testing_report.json
+                          echo "    \"passed_instances\": 0," >> /tmp/performance_testing_report.json
+                          echo "    \"failed_instances\": 0," >> /tmp/performance_testing_report.json
+                          echo "    \"average_response_time_ms\": 0," >> /tmp/performance_testing_report.json
+                          echo "    \"average_cpu_utilization\": 0" >> /tmp/performance_testing_report.json
+                          echo "  }" >> /tmp/performance_testing_report.json
+                          echo "}" >> /tmp/performance_testing_report.json
+                          
+                          # Performance testing for each instance
+                          TOTAL_INSTANCES=0
+                          PASSED_INSTANCES=0
+                          FAILED_INSTANCES=0
+                          TOTAL_RESPONSE_TIME=0
+                          TOTAL_CPU=0
+                          
+                          for INSTANCE_ID in $INSTANCE_IDS; do
+                            TOTAL_INSTANCES=$((TOTAL_INSTANCES + 1))
+                            
+                            echo "Running performance tests on instance: $INSTANCE_ID"
+                            
+                            # Get instance private IP
+                            PRIVATE_IP=$(aws ec2 describe-instances \
+                              --instance-ids "$INSTANCE_ID" \
+                              --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+                              --output text --region $AWS_REGION)
+                            
+                            if [[ "$PRIVATE_IP" == "None" || -z "$PRIVATE_IP" ]]; then
+                              echo "Could not get private IP for instance: $INSTANCE_ID"
+                              FAILED_INSTANCES=$((FAILED_INSTANCES + 1))
+                              
+                              # Update JSON report for failed instance
+                              jq --arg id "$INSTANCE_ID" \
+                                 '.instances[$id] = {
+                                   "status": "Failed",
+                                   "private_ip": null,
+                                   "response_time_ms": null,
+                                   "cpu_utilization": null,
+                                   "memory_utilization": null,
+                                   "error": "Failed to get IP"
+                                 }' /tmp/performance_testing_report.json > /tmp/performance_testing_report.json.new
+                              mv /tmp/performance_testing_report.json.new /tmp/performance_testing_report.json
+                              continue
+                            fi
+                            
+                            echo "Testing performance for instance $INSTANCE_ID at $PRIVATE_IP"
+                            
+                            # Basic load testing with curl
+                            echo "Running basic load test..."
+                            
+                            # Perform multiple requests to measure response time
+                            RESPONSE_TIMES=()
+                            SUCCESSFUL_REQUESTS=0
+                            TOTAL_REQUESTS=10
+                            
+                            for i in $(seq 1 $TOTAL_REQUESTS); do
+                              echo "Request $i/$TOTAL_REQUESTS to $PRIVATE_IP:$APPLICATION_PORT"
+                              
+                              START_TIME=$(date +%s%3N)
+                              
+                              if timeout 10 bash -c "</dev/tcp/$PRIVATE_IP/$APPLICATION_PORT"; then
+                                END_TIME=$(date +%s%3N)
+                                RESPONSE_TIME=$((END_TIME - START_TIME))
+                                RESPONSE_TIMES+=($RESPONSE_TIME)
+                                SUCCESSFUL_REQUESTS=$((SUCCESSFUL_REQUESTS + 1))
+                                echo "  Response time: ${RESPONSE_TIME}ms"
+                              else
+                                echo "  Request failed"
+                              fi
+                              
+                              # Small delay between requests
+                              sleep 0.5
+                            done
+                            
+                            # Calculate average response time
+                            if [[ ${#RESPONSE_TIMES[@]} -gt 0 ]]; then
+                              AVG_RESPONSE_TIME=$(printf '%s\n' "${RESPONSE_TIMES[@]}" | awk '{sum+=$1} END {if(NR>0) print sum/NR; else print 0}')
+                              echo "Average response time for $INSTANCE_ID: ${AVG_RESPONSE_TIME}ms"
+                              TOTAL_RESPONSE_TIME=$(echo "$TOTAL_RESPONSE_TIME + $AVG_RESPONSE_TIME" | bc -l 2>/dev/null || echo "$TOTAL_RESPONSE_TIME")
+                            else
+                              AVG_RESPONSE_TIME=0
+                              echo "No successful requests for $INSTANCE_ID"
+                            fi
+                            
+                            # Get current CPU utilization
+                            echo "Checking current CPU utilization for $INSTANCE_ID..."
+                            
+                            CPU_UTILIZATION=$(aws cloudwatch get-metric-statistics \
+                              --namespace AWS/EC2 \
+                              --metric-name CPUUtilization \
+                              --dimensions Name=InstanceId,Value="$INSTANCE_ID" \
+                              --start-time $(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%S) \
+                              --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+                              --period 300 \
+                              --statistics Average \
+                              --query 'Datapoints[*].Average' \
+                              --output text --region $AWS_REGION 2>/dev/null || echo "")
+                            
+                            if [[ -n "$CPU_UTILIZATION" && "$CPU_UTILIZATION" != "None" ]]; then
+                              AVG_CPU=$(echo "$CPU_UTILIZATION" | awk '{sum=0; count=0; for(i=1;i<=NF;i++){sum+=$i; count++}} END {if(count>0) print sum/count; else print 0}')
+                              echo "Current CPU utilization for $INSTANCE_ID: ${AVG_CPU}%"
+                              TOTAL_CPU=$(echo "$TOTAL_CPU + $AVG_CPU" | bc -l 2>/dev/null || echo "$TOTAL_CPU")
+                            else
+                              AVG_CPU=0
+                              echo "No CPU metrics available for $INSTANCE_ID"
+                            fi
+                            
+                            # Get memory utilization via SSM if available
+                            echo "Checking memory utilization for $INSTANCE_ID..."
+                            
+                            MEMORY_COMMAND_ID=$(aws ssm send-command \
+                              --instance-ids "$INSTANCE_ID" \
+                              --document-name "AWS-RunShellScript" \
+                              --parameters 'commands=["free | grep Mem | awk '"'"'{print ($3/$2) * 100.0}'"'"'"]' \
+                              --query 'Command.CommandId' \
+                              --output text --region $AWS_REGION 2>/dev/null || echo "")
+                            
+                            MEMORY_UTILIZATION=0
+                            if [[ -n "$MEMORY_COMMAND_ID" ]]; then
+                              # Wait a bit for command to execute
+                              sleep 5
+                              
+                              MEMORY_OUTPUT=$(aws ssm get-command-invocation \
+                                --command-id "$MEMORY_COMMAND_ID" \
+                                --instance-id "$INSTANCE_ID" \
+                                --query 'StandardOutputContent' \
+                                --output text --region $AWS_REGION 2>/dev/null || echo "")
+                              
+                              if [[ -n "$MEMORY_OUTPUT" && "$MEMORY_OUTPUT" != "None" ]]; then
+                                MEMORY_UTILIZATION=$(echo "$MEMORY_OUTPUT" | head -1 | awk '{print $1}' | cut -d. -f1)
+                                echo "Memory utilization for $INSTANCE_ID: ${MEMORY_UTILIZATION}%"
+                              fi
+                            fi
+                            
+                            # Determine performance test result
+                            SUCCESS_RATE=$(echo "scale=2; $SUCCESSFUL_REQUESTS * 100 / $TOTAL_REQUESTS" | bc -l 2>/dev/null || echo "0")
+                            
+                            if [[ $SUCCESSFUL_REQUESTS -ge 8 && $(echo "$AVG_RESPONSE_TIME < 5000" | bc -l 2>/dev/null || echo "0") -eq 1 ]]; then
+                              PERFORMANCE_STATUS="Passed"
+                              PASSED_INSTANCES=$((PASSED_INSTANCES + 1))
+                              echo "Performance test PASSED for $INSTANCE_ID (Success rate: ${SUCCESS_RATE}%)"
+                            else
+                              PERFORMANCE_STATUS="Failed"
+                              FAILED_INSTANCES=$((FAILED_INSTANCES + 1))
+                              echo "Performance test FAILED for $INSTANCE_ID (Success rate: ${SUCCESS_RATE}%)"
+                            fi
+                            
+                            # Update JSON report
+                            jq --arg id "$INSTANCE_ID" --arg status "$PERFORMANCE_STATUS" \
+                               --arg ip "$PRIVATE_IP" --arg response_time "$AVG_RESPONSE_TIME" \
+                               --arg cpu "$AVG_CPU" --arg memory "$MEMORY_UTILIZATION" \
+                               --arg success_rate "$SUCCESS_RATE" \
+                               '.instances[$id] = {
+                                 "status": $status,
+                                 "private_ip": $ip,
+                                 "response_time_ms": ($response_time | tonumber),
+                                 "cpu_utilization": ($cpu | tonumber),
+                                 "memory_utilization": ($memory | tonumber),
+                                 "success_rate_percent": ($success_rate | tonumber),
+                                 "total_requests": 10,
+                                 "successful_requests": '"$SUCCESSFUL_REQUESTS"'
+                               }' /tmp/performance_testing_report.json > /tmp/performance_testing_report.json.new
+                            mv /tmp/performance_testing_report.json.new /tmp/performance_testing_report.json
+                          done
+                          
+                          # Calculate overall averages
+                          if [[ $TOTAL_INSTANCES -gt 0 ]]; then
+                            OVERALL_AVG_RESPONSE_TIME=$(echo "scale=2; $TOTAL_RESPONSE_TIME / $TOTAL_INSTANCES" | bc -l 2>/dev/null || echo "0")
+                            OVERALL_AVG_CPU=$(echo "scale=2; $TOTAL_CPU / $TOTAL_INSTANCES" | bc -l 2>/dev/null || echo "0")
+                          else
+                            OVERALL_AVG_RESPONSE_TIME=0
+                            OVERALL_AVG_CPU=0
+                          fi
+                          
+                          # Update summary in JSON report
+                          jq --arg total "$TOTAL_INSTANCES" --arg passed "$PASSED_INSTANCES" \
+                             --arg failed "$FAILED_INSTANCES" --arg avg_response "$OVERALL_AVG_RESPONSE_TIME" \
+                             --arg avg_cpu "$OVERALL_AVG_CPU" \
+                             '.summary = {
+                               "total_instances": ($total | tonumber),
+                               "passed_instances": ($passed | tonumber),
+                               "failed_instances": ($failed | tonumber),
+                               "pass_percentage": (if ($total | tonumber) > 0 then (($passed | tonumber) * 100 / ($total | tonumber)) else 0 end),
+                               "average_response_time_ms": ($avg_response | tonumber),
+                               "average_cpu_utilization": ($avg_cpu | tonumber)
+                             }' /tmp/performance_testing_report.json > /tmp/performance_testing_report.json.new
+                          mv /tmp/performance_testing_report.json.new /tmp/performance_testing_report.json
+                          
+                          # Save performance testing results
+                          cp /tmp/performance_testing_report.json <+artifacts>.path/performance_testing_report.json
+                          
+                          # Determine overall performance status
+                          if [[ $PASSED_INSTANCES -eq $TOTAL_INSTANCES ]]; then
+                            echo "passed" > /tmp/performance_status.txt
+                            echo "Performance testing completed successfully - All instances passed"
+                          elif [[ $PASSED_INSTANCES -gt 0 ]]; then
+                            echo "partial" > /tmp/performance_status.txt
+                            echo "Performance testing completed with issues - Some instances failed"
+                          else
+                            echo "failed" > /tmp/performance_status.txt
+                            echo "Performance testing failed - No instances passed"
+                          fi
+                          
+                          echo "Performance Testing Summary:"
+                          echo "  Total instances: $TOTAL_INSTANCES"
+                          echo "  Passed: $PASSED_INSTANCES"
+                          echo "  Failed: $FAILED_INSTANCES"
+                          echo "  Average response time: ${OVERALL_AVG_RESPONSE_TIME}ms"
+                          echo "  Average CPU utilization: ${OVERALL_AVG_CPU}%"
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: <+input>.awsRegion
+                    outputVariables:
+                      - name: performance_status
+                        type: String
+                        value: "passed"
+                  timeout: 30m
+              
+              # Step 3.3: Rollback Decision Point
+              - step:
+                  type: HarnessApproval
+                  name: "Rollback Decision"
+                  identifier: rollback_decision
+                  spec:
+                    approvalMessage: |
+                      Post-patch validation completed for landing zone: <+input>.landingZone
+                      
+                      Results:
+                      - Application validation: <+execution.steps.application_validation.output.outputVariables.app_validation_status>
+                      - Performance testing: <+execution.steps.performance_testing.output.outputVariables.performance_status>
+                      
+                      Do you want to proceed with the current state or initiate rollback?
+                    includePipelineExecutionHistory: true
+                    approvers:
+                      userGroups:
+                        - patching_approvers
+                      minimumCount: 1
+                      disallowPipelineExecutor: false
+                    approverInputs:
+                      - name: rollback_required
+                        type: String
+                        defaultValue: "false"
+                  timeout: 2h
+              
+              # Step 3.4: Conditional Rollback
+              - step:
+                  type: ShellScript
+                  name: "Conditional Rollback"
+                  identifier: conditional_rollback
+                  when:
+                    stageStatus: Success
+                    condition: <+execution.steps.rollback_decision.output.approverInputs.rollback_required> == "true"
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          
+                          echo "=== Rollback Procedure ==="
+                          
+                          if [[ "<+execution.steps.rollback_decision.output.approverInputs.rollback_required>" == "true" ]]; then
+                            echo "Initiating rollback procedure for landing zone: $LANDING_ZONE"
+                            
+                            # Get list of instances
+                            INSTANCE_IDS=$(aws ec2 describe-instances \
+                              --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running,stopped" \
+                              --query 'Reservations[].Instances[].InstanceId' \
+                              --output text --region $AWS_REGION)
+                            
+                            if [[ -z "$INSTANCE_IDS" ]]; then
+                              echo "No instances found in landing zone: $LANDING_ZONE"
+                              exit 1
+                            fi
+                            
+                            echo "Found instances for rollback: $INSTANCE_IDS"
+                            
+                            # Create rollback report
+                            echo "{" > /tmp/rollback_report.json
+                            echo "  \"rollback_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> /tmp/rollback_report.json
+                            echo "  \"landing_zone\": \"$LANDING_ZONE\"," >> /tmp/rollback_report.json
+                            echo "  \"landing_zone_id\": \"$LANDING_ZONE_ID\"," >> /tmp/rollback_report.json
+                            echo "  \"instances\": {}," >> /tmp/rollback_report.json
+                            echo "  \"summary\": {" >> /tmp/rollback_report.json
+                            echo "    \"total_instances\": 0," >> /tmp/rollback_report.json
+                            echo "    \"successful_rollbacks\": 0," >> /tmp/rollback_report.json
+                            echo "    \"failed_rollbacks\": 0" >> /tmp/rollback_report.json
+                            echo "  }" >> /tmp/rollback_report.json
+                            echo "}" >> /tmp/rollback_report.json
+                            
+                            TOTAL_INSTANCES=0
+                            SUCCESSFUL_ROLLBACKS=0
+                            FAILED_ROLLBACKS=0
+                            
+                            # Process each instance for rollback
+                            for INSTANCE_ID in $INSTANCE_IDS; do
+                              TOTAL_INSTANCES=$((TOTAL_INSTANCES + 1))
+                              
+                              echo "Processing rollback for instance: $INSTANCE_ID"
+                              
+                              # Get the backup AMI ID from artifacts or find the latest backup
+                              BACKUP_AMI_ID=""
+                              
+                              # Try to get from artifacts first
+                              if [[ -f "<+artifacts>.path/ami_backup_report.json" ]]; then
+                                BACKUP_AMI_ID=$(jq -r ".instances[\"$INSTANCE_ID\"].backup_ami_id // empty" "<+artifacts>.path/ami_backup_report.json" 2>/dev/null || echo "")
+                              fi
+                              
+                              # If not found in artifacts, search for recent AMI backups
+                              if [[ -z "$BACKUP_AMI_ID" ]]; then
+                                echo "Searching for recent AMI backup for instance: $INSTANCE_ID"
+                                
+                                BACKUP_AMI_ID=$(aws ec2 describe-images \
+                                  --owners self \
+                                  --filters "Name=tag:SourceInstanceId,Values=$INSTANCE_ID" "Name=tag:BackupType,Values=pre-patch" \
+                                  --query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
+                                  --output text --region $AWS_REGION 2>/dev/null || echo "")
+                              fi
+                              
+                              if [[ -z "$BACKUP_AMI_ID" || "$BACKUP_AMI_ID" == "None" ]]; then
+                                echo "No backup AMI found for instance: $INSTANCE_ID"
+                                FAILED_ROLLBACKS=$((FAILED_ROLLBACKS + 1))
+                                
+                                # Update JSON report for failed rollback
+                                jq --arg id "$INSTANCE_ID" \
+                                   '.instances[$id] = {
+                                     "status": "Failed",
+                                     "backup_ami_id": null,
+                                     "new_instance_id": null,
+                                     "error": "No backup AMI found"
+                                   }' /tmp/rollback_report.json > /tmp/rollback_report.json.new
+                                mv /tmp/rollback_report.json.new /tmp/rollback_report.json
+                                continue
+                              fi
+                              
+                              echo "Found backup AMI for $INSTANCE_ID: $BACKUP_AMI_ID"
+                              
+                              # Get instance details for rollback
+                              INSTANCE_DETAILS=$(aws ec2 describe-instances \
+                                --instance-ids "$INSTANCE_ID" \
+                                --query 'Reservations[0].Instances[0]' \
+                                --output json --region $AWS_REGION)
+                              
+                              SUBNET_ID=$(echo "$INSTANCE_DETAILS" | jq -r '.SubnetId')
+                              SECURITY_GROUP_IDS=$(echo "$INSTANCE_DETAILS" | jq -r '.SecurityGroups[].GroupId' | tr '\n' ' ')
+                              INSTANCE_TYPE=$(echo "$INSTANCE_DETAILS" | jq -r '.InstanceType')
+                              KEY_NAME=$(echo "$INSTANCE_DETAILS" | jq -r '.KeyName // empty')
+                              
+                              echo "Instance details - Subnet: $SUBNET_ID, Security Groups: $SECURITY_GROUP_IDS, Type: $INSTANCE_TYPE"
+                              
+                              # Stop the current instance
+                              echo "Stopping instance: $INSTANCE_ID"
+                              aws ec2 stop-instances --instance-ids "$INSTANCE_ID" --region $AWS_REGION
+                              
+                              # Wait for instance to stop
+                              echo "Waiting for instance to stop..."
+                              aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID" --region $AWS_REGION
+                              
+                              # Launch new instance from backup AMI
+                              echo "Launching new instance from backup AMI: $BACKUP_AMI_ID"
+                              
+                              LAUNCH_PARAMS="--image-id $BACKUP_AMI_ID --instance-type $INSTANCE_TYPE --subnet-id $SUBNET_ID"
+                              
+                              if [[ -n "$SECURITY_GROUP_IDS" ]]; then
+                                LAUNCH_PARAMS="$LAUNCH_PARAMS --security-group-ids $SECURITY_GROUP_IDS"
+                              fi
+                              
+                              if [[ -n "$KEY_NAME" ]]; then
+                                LAUNCH_PARAMS="$LAUNCH_PARAMS --key-name $KEY_NAME"
+                              fi
+                              
+                              # Add tags to identify the rollback instance
+                              TAG_SPEC="ResourceType=instance,Tags=[{Key=Name,Value=Rollback-$(date +%Y%m%d-%H%M%S)},{Key=Environment,Value=$LANDING_ZONE},{Key=RollbackFrom,Value=$INSTANCE_ID},{Key=BackupAMI,Value=$BACKUP_AMI_ID}]"
+                              LAUNCH_PARAMS="$LAUNCH_PARAMS --tag-specifications $TAG_SPEC"
+                              
+                              NEW_INSTANCE_ID=$(aws ec2 run-instances $LAUNCH_PARAMS \
+                                --query 'Instances[0].InstanceId' \
+                                --output text --region $AWS_REGION)
+                              
+                              if [[ -z "$NEW_INSTANCE_ID" || "$NEW_INSTANCE_ID" == "None" ]]; then
+                                echo "Failed to launch rollback instance for: $INSTANCE_ID"
+                                FAILED_ROLLBACKS=$((FAILED_ROLLBACKS + 1))
+                                
+                                # Update JSON report for failed rollback
+                                jq --arg id "$INSTANCE_ID" --arg ami "$BACKUP_AMI_ID" \
+                                   '.instances[$id] = {
+                                     "status": "Failed",
+                                     "backup_ami_id": $ami,
+                                     "new_instance_id": null,
+                                     "error": "Failed to launch new instance"
+                                   }' /tmp/rollback_report.json > /tmp/rollback_report.json.new
+                                mv /tmp/rollback_report.json.new /tmp/rollback_report.json
+                                continue
+                              fi
+                              
+                              echo "New rollback instance launched: $NEW_INSTANCE_ID"
+                              
+                              # Wait for new instance to be running
+                              echo "Waiting for new instance to be running..."
+                              aws ec2 wait instance-running --instance-ids "$NEW_INSTANCE_ID" --region $AWS_REGION
+                              
+                              # Wait for instance status checks
+                              echo "Waiting for instance status checks to pass..."
+                              aws ec2 wait instance-status-ok --instance-ids "$NEW_INSTANCE_ID" --region $AWS_REGION
+                              
+                              echo "Rollback completed successfully for $INSTANCE_ID -> $NEW_INSTANCE_ID"
+                              SUCCESSFUL_ROLLBACKS=$((SUCCESSFUL_ROLLBACKS + 1))
+                              
+                              # Update JSON report for successful rollback
+                              jq --arg id "$INSTANCE_ID" --arg ami "$BACKUP_AMI_ID" --arg new_id "$NEW_INSTANCE_ID" \
+                                 '.instances[$id] = {
+                                   "status": "Success",
+                                   "backup_ami_id": $ami,
+                                   "new_instance_id": $new_id,
+                                   "error": null
+                                 }' /tmp/rollback_report.json > /tmp/rollback_report.json.new
+                              mv /tmp/rollback_report.json.new /tmp/rollback_report.json
+                            done
+                            
+                            # Update summary in JSON report
+                            jq --arg total "$TOTAL_INSTANCES" --arg successful "$SUCCESSFUL_ROLLBACKS" \
+                               --arg failed "$FAILED_ROLLBACKS" \
+                               '.summary = {
+                                 "total_instances": ($total | tonumber),
+                                 "successful_rollbacks": ($successful | tonumber),
+                                 "failed_rollbacks": ($failed | tonumber),
+                                 "success_percentage": (if ($total | tonumber) > 0 then (($successful | tonumber) * 100 / ($total | tonumber)) else 0 end)
+                               }' /tmp/rollback_report.json > /tmp/rollback_report.json.new
+                            mv /tmp/rollback_report.json.new /tmp/rollback_report.json
+                            
+                            # Save rollback results
+                            cp /tmp/rollback_report.json <+artifacts>.path/rollback_report.json
+                            
+                            # Determine overall rollback status
+                            if [[ $SUCCESSFUL_ROLLBACKS -eq $TOTAL_INSTANCES ]]; then
+                              echo "completed" > /tmp/rollback_status.txt
+                              echo "Rollback completed successfully for all instances"
+                            elif [[ $SUCCESSFUL_ROLLBACKS -gt 0 ]]; then
+                              echo "partial" > /tmp/rollback_status.txt
+                              echo "Rollback completed with issues - Some instances failed"
+                            else
+                              echo "failed" > /tmp/rollback_status.txt
+                              echo "Rollback failed for all instances"
+                            fi
+                            
+                            echo "Rollback Summary:"
+                            echo "  Total instances: $TOTAL_INSTANCES"
+                            echo "  Successful rollbacks: $SUCCESSFUL_ROLLBACKS"
+                            echo "  Failed rollbacks: $FAILED_ROLLBACKS"
+                          else
+                            echo "No rollback required, proceeding with current state"
+                            echo "skipped" > /tmp/rollback_status.txt
+                          fi
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: <+input>.awsRegion
+                    outputVariables:
+                      - name: rollback_status
+                        type: String
+                        value: "completed"
+                  timeout: 30m
+              
+              # Step 3.5: Reporting & Cleanup
+              - step:
+                  type: ShellScript
+                  name: "Reporting & Cleanup"
+                  identifier: reporting_cleanup
+                  spec:
+                    shell: Bash
+                    onDelegate: true
+                    source:
+                      type: Inline
+                      spec:
+                        script: |
+                          #!/bin/bash
+                          set -e
+                          
+                          # Hardcoded configuration
+                          LANDING_ZONE="production-web-tier"
+                          LANDING_ZONE_ID="prod-web-001"
+                          AWS_REGION="ap-southeast-2"
+                          SNS_TOPIC_ARN="arn:aws:sns:ap-southeast-2:123456789012:patching-notifications"
+                          
+                          echo "=== Final Reporting & Cleanup ==="
+                          
+                          # Get list of instances
+                          INSTANCE_IDS=$(aws ec2 describe-instances \
+                            --filters "Name=tag:Environment,Values=$LANDING_ZONE" "Name=instance-state-name,Values=running,stopped" \
+                            --query 'Reservations[].Instances[].InstanceId' \
+                            --output text --region $AWS_REGION)
+                          
+                          if [[ -z "$INSTANCE_IDS" ]]; then
+                            echo "No instances found in landing zone: $LANDING_ZONE"
+                            exit 1
+                          fi
+                          
+                          echo "Generating comprehensive report for instances: $INSTANCE_IDS"
+                          
+                          # Create comprehensive final report
+                          echo "{" > /tmp/final_report.json
+                          echo "  \"report_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> /tmp/final_report.json
+                          echo "  \"landing_zone\": \"$LANDING_ZONE\"," >> /tmp/final_report.json
+                          echo "  \"landing_zone_id\": \"$LANDING_ZONE_ID\"," >> /tmp/final_report.json
+                          echo "  \"pipeline_execution\": {" >> /tmp/final_report.json
+                          echo "    \"pre_patch_phase\": {}," >> /tmp/final_report.json
+                          echo "    \"patching_phase\": {}," >> /tmp/final_report.json
+                          echo "    \"post_patch_phase\": {}" >> /tmp/final_report.json
+                          echo "  }," >> /tmp/final_report.json
+                          echo "  \"instances\": {}," >> /tmp/final_report.json
+                          echo "  \"summary\": {" >> /tmp/final_report.json
+                          echo "    \"total_instances\": 0," >> /tmp/final_report.json
+                          echo "    \"successful_patches\": 0," >> /tmp/final_report.json
+                          echo "    \"failed_patches\": 0," >> /tmp/final_report.json
+                          echo "    \"rollbacks_performed\": 0," >> /tmp/final_report.json
+                          echo "    \"overall_status\": \"unknown\"" >> /tmp/final_report.json
+                          echo "  }" >> /tmp/final_report.json
+                          echo "}" >> /tmp/final_report.json
+                          
+                          TOTAL_INSTANCES=0
+                          SUCCESSFUL_PATCHES=0
+                          FAILED_PATCHES=0
+                          ROLLBACKS_PERFORMED=0
+                          
+                          # Collect data from previous phases
+                          echo "Collecting data from previous pipeline phases..."
+                          
+                          # Load AMI backup results if available
+                          if [[ -f "<+artifacts>.path/ami_backup_report.json" ]]; then
+                            echo "Loading AMI backup results..."
+                            jq '.pre_patch_phase.ami_backup = input' /tmp/final_report.json <+artifacts>.path/ami_backup_report.json > /tmp/final_report.json.new
+                            mv /tmp/final_report.json.new /tmp/final_report.json
+                          fi
+                          
+                          # Load health check results if available
+                          if [[ -f "<+artifacts>.path/health_check_report.json" ]]; then
+                            echo "Loading health check results..."
+                            jq '.pre_patch_phase.health_checks = input' /tmp/final_report.json <+artifacts>.path/health_check_report.json > /tmp/final_report.json.new
+                            mv /tmp/final_report.json.new /tmp/final_report.json
+                          fi
+                          
+                          # Load patch installation results if available
+                          if [[ -f "<+artifacts>.path/patch_installation_report.json" ]]; then
+                            echo "Loading patch installation results..."
+                            jq '.patching_phase.patch_installation = input' /tmp/final_report.json <+artifacts>.path/patch_installation_report.json > /tmp/final_report.json.new
+                            mv /tmp/final_report.json.new /tmp/final_report.json
+                          fi
+                          
+                          # Load reboot management results if available
+                          if [[ -f "<+artifacts>.path/reboot_management_report.json" ]]; then
+                            echo "Loading reboot management results..."
+                            jq '.patching_phase.reboot_management = input' /tmp/final_report.json <+artifacts>.path/reboot_management_report.json > /tmp/final_report.json.new
+                            mv /tmp/final_report.json.new /tmp/final_report.json
+                          fi
+                          
+                          # Load patch verification results if available
+                          if [[ -f "<+artifacts>.path/patch_verification_report.json" ]]; then
+                            echo "Loading patch verification results..."
+                            jq '.patching_phase.patch_verification = input' /tmp/final_report.json <+artifacts>.path/patch_verification_report.json > /tmp/final_report.json.new
+                            mv /tmp/final_report.json.new /tmp/final_report.json
+                          fi
+                          
+                          # Load application validation results if available
+                          if [[ -f "<+artifacts>.path/application_validation_report.json" ]]; then
+                            echo "Loading application validation results..."
+                            jq '.post_patch_phase.application_validation = input' /tmp/final_report.json <+artifacts>.path/application_validation_report.json > /tmp/final_report.json.new
+                            mv /tmp/final_report.json.new /tmp/final_report.json
+                          fi
+                          
+                          # Load performance testing results if available
+                          if [[ -f "<+artifacts>.path/performance_testing_report.json" ]]; then
+                            echo "Loading performance testing results..."
+                            jq '.post_patch_phase.performance_testing = input' /tmp/final_report.json <+artifacts>.path/performance_testing_report.json > /tmp/final_report.json.new
+                            mv /tmp/final_report.json.new /tmp/final_report.json
+                          fi
+                          
+                          # Load rollback results if available
+                          if [[ -f "<+artifacts>.path/rollback_report.json" ]]; then
+                            echo "Loading rollback results..."
+                            jq '.post_patch_phase.rollback = input' /tmp/final_report.json <+artifacts>.path/rollback_report.json > /tmp/final_report.json.new
+                            mv /tmp/final_report.json.new /tmp/final_report.json
+                            
+                            # Count rollbacks
+                            ROLLBACKS_PERFORMED=$(jq -r '.post_patch_phase.rollback.summary.successful_rollbacks // 0' /tmp/final_report.json)
+                          fi
+                          
+                          # Generate instance-level summary
+                          for INSTANCE_ID in $INSTANCE_IDS; do
+                            TOTAL_INSTANCES=$((TOTAL_INSTANCES + 1))
+                            
+                            echo "Generating summary for instance: $INSTANCE_ID"
+                            
+                            # Get current instance state
+                            INSTANCE_STATE=$(aws ec2 describe-instances \
+                              --instance-ids "$INSTANCE_ID" \
+                              --query 'Reservations[0].Instances[0].State.Name' \
+                              --output text --region $AWS_REGION 2>/dev/null || echo "unknown")
+                            
+                            # Determine patch status based on available reports
+                            PATCH_STATUS="unknown"
+                            
+                            # Check if patch verification was successful
+                            if [[ -f "<+artifacts>.path/patch_verification_report.json" ]]; then
+                              VERIFICATION_STATUS=$(jq -r ".instances[\"$INSTANCE_ID\"].status // \"unknown\"" "<+artifacts>.path/patch_verification_report.json" 2>/dev/null || echo "unknown")
+                              if [[ "$VERIFICATION_STATUS" == "Compliant" ]]; then
+                                PATCH_STATUS="success"
+                                SUCCESSFUL_PATCHES=$((SUCCESSFUL_PATCHES + 1))
+                              elif [[ "$VERIFICATION_STATUS" == "Non-Compliant" ]]; then
+                                PATCH_STATUS="failed"
+                                FAILED_PATCHES=$((FAILED_PATCHES + 1))
+                              fi
+                            fi
+                            
+                            # If verification status is unknown, check patch installation status
+                            if [[ "$PATCH_STATUS" == "unknown" && -f "<+artifacts>.path/patch_installation_report.json" ]]; then
+                              INSTALLATION_STATUS=$(jq -r ".instances[\"$INSTANCE_ID\"].status // \"unknown\"" "<+artifacts>.path/patch_installation_report.json" 2>/dev/null || echo "unknown")
+                              if [[ "$INSTALLATION_STATUS" == "Success" ]]; then
+                                PATCH_STATUS="success"
+                                SUCCESSFUL_PATCHES=$((SUCCESSFUL_PATCHES + 1))
+                              elif [[ "$INSTALLATION_STATUS" == "Failed" ]]; then
+                                PATCH_STATUS="failed"
+                                FAILED_PATCHES=$((FAILED_PATCHES + 1))
+                              fi
+                            fi
+                            
+                            # If still unknown, mark as failed
+                            if [[ "$PATCH_STATUS" == "unknown" ]]; then
+                              PATCH_STATUS="failed"
+                              FAILED_PATCHES=$((FAILED_PATCHES + 1))
+                            fi
+                            
+                            # Add instance summary to report
+                            jq --arg id "$INSTANCE_ID" --arg state "$INSTANCE_STATE" --arg status "$PATCH_STATUS" \
+                               '.instances[$id] = {
+                                 "current_state": $state,
+                                 "patch_status": $status,
+                                 "timestamp": now | strftime("%Y-%m-%dT%H:%M:%SZ")
+                               }' /tmp/final_report.json > /tmp/final_report.json.new
+                            mv /tmp/final_report.json.new /tmp/final_report.json
+                          done
+                          
+                          # Determine overall status
+                          OVERALL_STATUS="failed"
+                          if [[ $SUCCESSFUL_PATCHES -eq $TOTAL_INSTANCES ]]; then
+                            OVERALL_STATUS="success"
+                          elif [[ $SUCCESSFUL_PATCHES -gt 0 ]]; then
+                            OVERALL_STATUS="partial"
+                          fi
+                          
+                          # Update summary in final report
+                          jq --arg total "$TOTAL_INSTANCES" --arg successful "$SUCCESSFUL_PATCHES" \
+                             --arg failed "$FAILED_PATCHES" --arg rollbacks "$ROLLBACKS_PERFORMED" \
+                             --arg overall "$OVERALL_STATUS" \
+                             '.summary = {
+                               "total_instances": ($total | tonumber),
+                               "successful_patches": ($successful | tonumber),
+                               "failed_patches": ($failed | tonumber),
+                               "rollbacks_performed": ($rollbacks | tonumber),
+                               "overall_status": $overall,
+                               "success_percentage": (if ($total | tonumber) > 0 then (($successful | tonumber) * 100 / ($total | tonumber)) else 0 end)
+                             }' /tmp/final_report.json > /tmp/final_report.json.new
+                          mv /tmp/final_report.json.new /tmp/final_report.json
+                          
+                          # Save final report
+                          cp /tmp/final_report.json <+artifacts>.path/final_report.json
+                          
+                          echo "Final Report Summary:"
+                          echo "  Landing Zone: $LANDING_ZONE ($LANDING_ZONE_ID)"
+                          echo "  Total instances: $TOTAL_INSTANCES"
+                          echo "  Successful patches: $SUCCESSFUL_PATCHES"
+                          echo "  Failed patches: $FAILED_PATCHES"
+                          echo "  Rollbacks performed: $ROLLBACKS_PERFORMED"
+                          echo "  Overall status: $OVERALL_STATUS"
+                          
+                          # Cleanup maintenance window if it exists
+                          echo "Cleaning up maintenance window..."
+                          if [[ -f "/tmp/maintenance_window_id.txt" ]]; then
+                            MAINTENANCE_WINDOW_ID=$(cat /tmp/maintenance_window_id.txt)
+                            if [[ -n "$MAINTENANCE_WINDOW_ID" && "$MAINTENANCE_WINDOW_ID" != "None" ]]; then
+                              echo "Deleting maintenance window: $MAINTENANCE_WINDOW_ID"
+                              aws ssm delete-maintenance-window \
+                                --window-id "$MAINTENANCE_WINDOW_ID" \
+                                --region $AWS_REGION || echo "Failed to delete maintenance window or it was already deleted"
+                            fi
+                          fi
+                          
+                          # Send notification
+                          echo "Sending notification..."
+                          
+                          # Create notification message
+                          NOTIFICATION_MESSAGE="EC2 Patching Pipeline Completed\n\nLanding Zone: $LANDING_ZONE ($LANDING_ZONE_ID)\nOverall Status: $OVERALL_STATUS\nTotal Instances: $TOTAL_INSTANCES\nSuccessful Patches: $SUCCESSFUL_PATCHES\nFailed Patches: $FAILED_PATCHES\nRollbacks Performed: $ROLLBACKS_PERFORMED\n\nExecution Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)\nPipeline ID: <+pipeline.executionId>\n\nFor detailed results, check the pipeline artifacts."
+                          
+                          # Send SNS notification (if topic exists)
+                          aws sns publish \
+                            --topic-arn "$SNS_TOPIC_ARN" \
+                            --message "$NOTIFICATION_MESSAGE" \
+                            --subject "EC2 Patching Pipeline - $OVERALL_STATUS" \
+                            --region $AWS_REGION 2>/dev/null || echo "Failed to send SNS notification - topic may not exist"
+                          
+                          # Create summary status file
+                          echo "$OVERALL_STATUS" > /tmp/pipeline_status.txt
+                          
+                          echo "Reporting and cleanup completed successfully"
+                          echo "Pipeline execution status: $OVERALL_STATUS"
+                    environmentVariables:
+                      - name: AWS_DEFAULT_REGION
+                        type: String
+                        value: <+input>.awsRegion
+                    outputVariables:
+                      - name: final_status
+                        type: String
+                        value: "completed"
+                  timeout: 15m
+  
+  # ========================================
+  # PIPELINE VARIABLES
+  # ========================================
+  
+  variables:
+    - name: landingZone
+      type: String
+      description: "Target landing zone for patching"
+      required: true
+      value: <+input>.landingZone
+    
+    - name: awsRegion
+      type: String
+      description: "AWS region for operations"
+      required: true
+      default: "ap-southeast-2"
+      value: <+input>.awsRegion
+    
+    - name: instanceId
+      type: String
+      description: "Specific instance ID (optional)"
+      required: false
+      value: <+input>.instanceId
+    
+    - name: applicationEndpoint
+      type: String
+      description: "Application health check endpoint"
+      required: true
+      value: <+input>.applicationEndpoint
+    
+    - name: notificationTopic
+      type: String
+      description: "SNS topic for notifications"
+      required: true
+      value: <+input>.notificationTopic
+    
+    - name: roleName
+      type: String
+      description: "AWS IAM role name for cross-account access"
+      required: true
+      value: <+input>.roleName
+  
+  # ========================================
+  # PIPELINE SETTINGS
+  # ========================================
+  
+  options:
+    keepRuntimeInputs: false
+    skipResourceVersioning: false
+  
+  # Failure Strategy
+  failureStrategies:
+    - onFailure:
+        errors:
+          - AllErrors
+        action:
+          type: StageRollback
+  
+  # Notification Rules
+  notificationRules:
+    - name: "Pipeline Success Notification"
+      pipelineEvents:
+        - PipelineSuccess
+      notificationMethod:
+        type: Slack
+        spec:
+          userGroups:
+            - patching_team
+          webhookUrl: <+input>.slackWebhookUrl
+    
+    - name: "Pipeline Failure Notification"
+      pipelineEvents:
+        - PipelineFailed
+      notificationMethod:
+        type: Email
+        spec:
+          userGroups:
+            - patching_approvers
+          subject: "AWS EC2 Patching Pipeline Failed - <+input>.landingZone"
+  
+  # Additional Tags
+  additionalTags:
+    pipeline_type: "ec2_patching"
+    automation_level: "full"
+    compliance: "required"

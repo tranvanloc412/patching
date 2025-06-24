@@ -1,0 +1,40 @@
+aws:
+  default_region: "ap-southeast-2"
+  cross_account_role: "HIPCMSProvisionSpokeRole"
+
+  # IAM Roles (uncomment and configure as needed)
+  # roles:
+  #   patching_role: "EC2-SSM-PatchingRole"
+  #   backup_role: "EC2-AMI-BackupRole"
+  #   monitoring_role: "CloudWatch-LogsRole"
+  #   # Add your specific patching IAM role
+  #   patching_iam_role: "arn:aws:iam::{account_id}:role/EC2-SSM-PatchingRole"
+
+  # SSM Documents
+  ssm_documents:
+    patch_baseline:
+      linux: "AWS-RunPatchBaseline"
+      windows: "AWS-RunPatchBaseline"
+    custom_patching:
+      linux: "CMS-LinuxPatching-v2"
+      windows: "CMS-WindowsPatching-v2"
+      # Your specific SSM document for Linux
+      ssm_document_linux: "CMS-LinuxPatching-v2"
+    # reboot:
+    #   linux: "AWS-RebootEC2Instance"
+    #   windows: "AWS-RebootEC2Instance"
+
+  # Service-specific settings
+  services:
+    ssm:
+      timeout_seconds: 3600
+      max_concurrent_executions: 10
+      # Add command execution settings
+      command_timeout_seconds: 1800
+      output_s3_bucket: "cms-ssm-command-outputs"
+    ec2:
+      backup_retention_days: 7
+      snapshot_timeout_minutes: 60
+      # Add instance management settings
+      start_timeout_minutes: 10
+      stop_timeout_minutes: 5

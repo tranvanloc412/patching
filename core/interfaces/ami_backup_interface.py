@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from core.models.instance import Instance
-from core.models.ami_backup import AMIBackup, BackupResult
+from core.models.ami_backup import AMIBackup
 
 
 class IAMIBackupService(ABC):
@@ -30,7 +30,7 @@ class IAMIBackupService(ABC):
     async def create_multiple_backups(self, instances: List[Instance],
                                      description_template: Optional[str] = None,
                                      tags: Optional[Dict[str, str]] = None,
-                                     max_concurrent: int = 5) -> List[BackupResult]:
+                                     max_concurrent: int = 5) -> List[AMIBackup]:
         """Create AMI backups for multiple instances concurrently.
         
         Args:
@@ -40,7 +40,7 @@ class IAMIBackupService(ABC):
             max_concurrent: Maximum concurrent backup operations
             
         Returns:
-            List of BackupResult objects
+            List of AMIBackup objects
         """
         pass
     

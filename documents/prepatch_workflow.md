@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the refactored 4-phase pre-patch workflow implementation that provides a comprehensive, automated approach to preparing CMS environments for patching operations. The workflow has been completely redesigned with clean architecture principles, async support, and improved maintainability.
+This document describes the simplified 3-phase pre-patch workflow implementation that provides a streamlined, automated approach to preparing CMS environments for patching operations. The workflow has been redesigned with clean architecture principles, async support, and reduced complexity for improved maintainability.
 
 ## Architecture
 
@@ -10,65 +10,58 @@ The implementation follows a clean architecture pattern with clear separation of
 
 ### Core Services
 
-1. **`core/services/config_service.py`** - Configuration management and validation
+1. **`core/services/config_service.py`** - Simple configuration management and validation
 2. **`core/services/scanner_service.py`** - EC2 instance discovery and inventory
 3. **`core/services/ami_backup_service.py`** - Automated AMI backup creation
 4. **`core/services/server_manager_service.py`** - Instance state management
-5. **`core/services/validation_service.py`** - Pre-patch health checks
-6. **`core/services/workflow_orchestrator.py`** - End-to-end workflow coordination
-7. **`core/services/report_service.py`** - Multi-format report generation
+5. **`core/services/workflow_orchestrator.py`** - Streamlined 3-phase workflow coordination
 
 ### Infrastructure Layer
 
 1. **`infrastructure/aws/`** - AWS service clients (EC2, SSM, STS)
-2. **`infrastructure/storage/`** - File and data storage handlers
+2. **`infrastructure/storage/`** - Basic file storage and CSV handlers
 3. **`infrastructure/aws/session_manager.py`** - Cross-account role assumption
 
 ### Data Models
 
-The workflow uses structured data models defined in `core/models/`:
+The workflow uses simplified data models defined in `core/models/`:
 
 - **Instance**: EC2 instance representation with status and metadata
-- **LandingZone**: AWS account and region configuration
-- **WorkflowConfig**: Workflow execution parameters
-- **ReportData**: Structured report information
+- **WorkflowConfig**: Simple workflow execution parameters
+- **PhaseResult**: Phase execution tracking and status
 - **AMIBackup**: AMI backup metadata and status
 
-## 4-Phase Workflow
+## 3-Phase Workflow
 
 ### Phase 1: Scanner
 
-- Discovers instances in specified landing zones or across all CMS environments
+- Discovers instances in specified landing zones
 - Generates initial CSV report with instance details
 - Captures initial state, platform, and SSM agent status
+- Concurrent scanning across multiple landing zones
 
 ### Phase 2: AMI Backup
 
 - Creates AMI backups for all discovered instances (running and stopped)
 - Updates CSV with backup status, AMI IDs, and completion times
-- Supports both synchronous and asynchronous backup operations
+- Supports asynchronous backup operations with configurable concurrency
+- Handles backup failures gracefully with retry mechanisms
 
-### Phase 3: Start Stopped Servers
+### Phase 3: Server Manager
 
-- Identifies instances that were initially stopped
-- Starts stopped instances to ensure they're running for patching
+- Manages instance states and prepares for patching
+- Starts stopped instances if required
 - Updates CSV with current instance states
-
-### Phase 4: Validation
-
-- Verifies all instances are in expected states
-- Checks SSM agent connectivity
-- Validates backup completion
-- Generates final validation report
+- Ensures instances are ready for patching operations
 
 ## CLI Commands
 
 ### Complete Workflow
 
 ```bash
-# Run complete 4-phase workflow
-python3 main.py --landing-zones lz250nonprod --environment nonprod
-python3 main.py --landing-zones lz250nonprod,cmsnonprod --environment nonprod
+# Run complete 3-phase workflow
+python3 main.py --landing-zones lz250nonprod
+python3 main.py --landing-zones lz250nonprod,cmsnonprod
 ```
 
 ### Scanner Only
@@ -83,21 +76,52 @@ python3 main.py --scanner-only --landing-zones lz250nonprod,cmsnonprod
 
 ```bash
 # Custom configuration file
-python3 main.py --config config/prepatch_config.yml --landing-zones lz250nonprod
+python3 main.py --config config.yml --landing-zones lz250nonprod
 
 # Custom output directory
 python3 main.py --landing-zones lz250nonprod --output-dir custom_reports/
-
-# Verbose logging
-python3 main.py --landing-zones lz250nonprod --verbose
-
-# Environment-specific execution
-python3 main.py --landing-zones lz250prod --environment prod
 ```
 
 ### Configuration-Driven Workflow
 
-The new architecture uses YAML configuration files to control workflow behavior:
+The simplified architecture uses a single YAML configuration file (`config.yml`) to control workflow behavior:
+
+```yaml
+# Simplified Patching Tool Configuration
+name: "Pre-Patch Workflow"
+
+# Landing zones to process
+landing_zones:
+  - "lz250nonprod"
+  - "cmsnonprod"
+
+# AWS settings
+aws:
+  region: "ap-southeast-2"
+  role_name: "CMS-CrossAccount-Role"
+  timeout: 60
+  max_retries: 3
+
+# Phase settings
+scanner:
+  enabled: true
+  timeout_minutes: 30
+  max_concurrent: 10
+
+ami_backup:
+  enabled: true
+  timeout_minutes: 60
+  max_concurrent: 5
+
+server_manager:
+  enabled: true
+  timeout_minutes: 10
+  max_concurrent: 10
+
+# Output settings
+output_dir: "reports"
+log_level: "INFO"
+```
 
 ```yaml
 # config/prepatch_config.yml

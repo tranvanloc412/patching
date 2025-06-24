@@ -1,0 +1,107 @@
+CMS PATCHING TOOL - ARCHITECTURE FLOW DIAGRAM
+==============================================
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                                ENTRY POINT                                     │
+└─────────────────────────────────┬───────────────────────────────────────────────┘
+                                  │
+                              main.py
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            INTERFACES (CONTRACTS)                              │
+├─────────────┬─────────────┬─────────────┬─────────────┬─────────────┬───────────┤
+│IWorkflow    │IScanner     │IAMIBackup   │IServerMgr   │IConfig      │IStorage   │
+│Orchestrator │Service      │Service      │Service      │Service      │Service    │
+└─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴───────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                      ORCHESTRATION (WORKFLOW COORDINATION)                     │
+└─────────────────────────────────┬───────────────────────────────────────────────┘
+                                  │
+                        WorkflowOrchestrator
+                                  │
+        ┌─────────────────────────┼─────────────────────────┐
+        │                         │                         │
+        ▼                         ▼                         ▼
+   Phase 1: Discovery        Phase 2: Backup         Phase 3: Patching
+   (Green - #28a745)        (Blue - #17a2b8)        (Red - #dc3545)
+        │                         │                         │
+        ▼                         ▼                         ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           SERVICES (DOMAIN LOGIC)                              │
+├─────────────┬─────────────┬─────────────┬─────────────┬─────────────────────────┤
+│Scanner      │AMIBackup    │ServerMgr    │Config       │Storage                  │
+│Service      │Service      │Service      │Service      │Service                  │
+│             │             │             │(Support)    │(Support)                │
+└─────────────┴─────────────┴─────────────┴─────────────┴─────────────────────────┘
+        │                         │                         │
+        ▼                         ▼                         ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          MODELS (DATA STRUCTURES)                              │
+├─────────────┬─────────────┬─────────────┬─────────────┬─────────────┬───────────┤
+│Workflow     │Instance     │AMIBackup    │Server       │Workflow     │Report     │
+│Result       │             │             │Operation    │Config       │           │
+└─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴───────────┘
+        │                         │                         │
+        ▼                         ▼                         ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                      INFRASTRUCTURE (AWS & STORAGE)                            │
+├─────────────┬─────────────┬─────────────┬─────────────┬─────────────┬───────────┤
+│AWSSession   │EC2Client    │SSMClient    │STSClient    │FileStorage  │CSVHandler │
+│Manager      │             │             │             │             │           │
+└─────────────┴─────────────┴─────────────┴─────────────┴─────────────┴───────────┘
+        │                         │                         │
+        ▼                         ▼                         ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                            EXTERNAL SYSTEMS                                    │
+├─────────────┬─────────────┬─────────────┬─────────────┬─────────────────────────┤
+│AWS EC2      │AWS SSM      │AWS STS      │File System  │Configuration Files      │
+└─────────────┴─────────────┴─────────────┴─────────────┴─────────────────────────┘
+
+
+3-PHASE WORKFLOW COORDINATION:
+==============================
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           WorkflowOrchestrator                                 │
+│                                     │                                           │
+│  ┌──────────────────────────────────┼──────────────────────────────────┐       │
+│  │                                  │                                  │       │
+│  ▼                                  ▼                                  ▼       │
+│ ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐       │
+│ │   Phase 1:      │       │   Phase 2:      │       │   Phase 3:      │       │
+│ │   Discovery     │  ───▶ │   Backup        │  ───▶ │   Patching      │       │
+│ │                 │       │                 │       │                 │       │
+│ │ • Scan EC2      │       │ • Create AMI    │       │ • Apply Patches │       │
+│ │ • Validate      │       │ • Verify Backup │       │ • Restart Svcs  │       │
+│ │ • Generate List │       │ • Update Status │       │ • Validate      │       │
+│ └─────────────────┘       └─────────────────┘       └─────────────────┘       │
+│                                                                                 │
+│ Supporting Services (Used Throughout):                                          │
+│ • ConfigService: Manages configuration and validation                           │
+│ • StorageService: Handles data persistence and reporting                       │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+
+LEGEND:
+=======
+│ ▼ │  Workflow Flow (Sequential)
+│ ─ │  Interface Dependency (Contracts)
+│ ═ │  Data Flow (Models)
+│ ┼ │  Infrastructure Calls
+│ ░ │  External System Access
+
+Color Coding (when viewed in color-capable editors):
+• Green (#28a745): Phase 1 - Discovery
+• Blue (#17a2b8): Phase 2 - Backup  
+• Red (#dc3545): Phase 3 - Patching
+• Gray (#6c757d): Support Services
+• Blue (#2563eb): Workflow Coordination
+
+Key Principles:
+• Dependency Inversion: Inner layers don't depend on outer layers
+• Single Responsibility: Each layer has one clear purpose
+• Testability: Each component can be mocked and tested independently
+• Flexibility: Easy to swap implementations without affecting other layers

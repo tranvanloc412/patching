@@ -1,0 +1,130 @@
+stages:
+  - stage:
+      name: "Pre-Patch"
+      identifier: "prepatch"
+      type: "Custom"
+      spec:
+        execution:
+          steps:
+            # 1. Instance Discovery
+            - step:
+                name: "Discover Instances"
+                identifier: "discover_instances"
+                type: "ShellScript"
+                spec:
+                  shell: "Bash"
+                  source:
+                    type: "Inline"
+                    spec:
+                      script: |
+                        # Scan EC2 instances in landing zone
+                        aws ec2 describe-instances \
+                          --filters "Name=tag:Environment,Values=<+pipeline.variables.landing_zone>" \
+                                   "Name=instance-state-name,Values=running,stopped" \
+                          --query 'Reservations[].Instances[].[InstanceId,State.Name,Tags[?Key==`Name`].Value|[0]]' \
+                          --output table > instances.txt
+
+                        # Export instance list for next steps
+                        aws ec2 describe-instances \
+                          --filters "Name=tag:Environment,Values=<+pipeline.variables.landing_zone>" \
+                          --query 'Reservations[].Instances[].InstanceId' \
+                          --output text > instance_ids.txt
+
+            # 2. Health Check
+            - step:
+                name: "Pre-Patch Health Check"
+                identifier: "health_check"
+                type: "ShellScript"
+                spec:
+                  shell: "Bash"
+                  source:
+                    type: "Inline"
+                    spec:
+                      script: |
+                        # Check SSM agent status
+                        for instance_id in $(cat instance_ids.txt); do
+                          echo "Checking SSM connectivity for $instance_id"
+                          aws ssm describe-instance-information \
+                            --filters "Key=InstanceIds,Values=$instance_id" \
+                            --query 'InstanceInformationList[0].PingStatus'
+                        done
+
+                        # Check disk space
+                        aws ssm send-command \
+                          --document-name "AWS-RunShellScript" \
+                          --parameters 'commands=["df -h"]' \
+                          --targets "Key=tag:Environment,Values=<+pipeline.variables.landing_zone>"
+
+            # 3. Create AMI Backups
+            - step:
+                name: "Create AMI Backups"
+                identifier: "create_backups"
+                type: "ShellScript"
+                spec:
+                  shell: "Bash"
+                  source:
+                    type: "Inline"
+                    spec:
+                      script: |
+                        backup_date=$(date +%Y%m%d-%H%M%S)
+
+                        for instance_id in $(cat instance_ids.txt); do
+                          echo "Creating backup for $instance_id"
+                          
+                          # Get instance name
+                          instance_name=$(aws ec2 describe-instances \
+                            --instance-ids $instance_id \
+                            --query 'Reservations[0].Instances[0].Tags[?Key==`Name`].Value' \
+                            --output text)
+                          
+                          # Create AMI
+                          ami_id=$(aws ec2 create-image \
+                            --instance-id $instance_id \
+                            --name "${instance_name}-prepatch-${backup_date}" \
+                            --description "Pre-patch backup for $instance_id" \
+                            --no-reboot \
+                            --query 'ImageId' --output text)
+                          
+                          echo "$instance_id:$ami_id" >> backup_mapping.txt
+                          
+                          # Tag the AMI
+                          aws ec2 create-tags \
+                            --resources $ami_id \
+                            --tags Key=Purpose,Value=PrePatchBackup \
+                                   Key=InstanceId,Value=$instance_id \
+                                   Key=CreatedDate,Value=$backup_date
+                        done
+
+            # 4. Wait for Backup Completion
+            - step:
+                name: "Wait for Backup Completion"
+                identifier: "wait_backups"
+                type: "ShellScript"
+                spec:
+                  shell: "Bash"
+                  source:
+                    type: "Inline"
+                    spec:
+                      script: |
+                        echo "Waiting for AMI backups to complete..."
+
+                        while IFS=':' read -r instance_id ami_id; do
+                          echo "Checking status of AMI $ami_id for instance $instance_id"
+                          
+                          while true; do
+                            status=$(aws ec2 describe-images \
+                              --image-ids $ami_id \
+                              --query 'Images[0].State' --output text)
+                            
+                            if [ "$status" = "available" ]; then
+                              echo "AMI $ami_id is ready"
+                              break
+                            elif [ "$status" = "failed" ]; then
+                              echo "AMI $ami_id failed to create"
+                              exit 1
+                            else
+                              echo "AMI $ami_id status: $status, waiting..."
+                              sleep 30
+                            fi
+                          done
+                        done < backup_mapping.txt

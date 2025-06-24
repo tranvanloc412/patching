@@ -1,71 +1,125 @@
-# Full Patching Workflow Diagram
+# CMS Patching Tool - Complete Flow Diagram
+
+This document provides a comprehensive flow diagram of the CMS Patching Tool workflow, showing all phases, decision points, and error handling paths.
 
 ## Overview
 
-This document provides a comprehensive flow diagram of the complete patching workflow, from initial configuration to final reporting.
+The patching workflow follows a clean architecture pattern with clear separation of concerns:
 
-## Full Patching Flow
+### Core Workflow Phases
+
+1. **Scanner Phase**: Discover and inventory EC2 instances across landing zones
+2. **AMI Backup Phase**: Create AMI backups for discovered instances
+3. **Server Manager Phase**: Manage instance states and prepare for patching
+4. **Precheck Phase**: Validate instance readiness for patching (optional)
+5. **Patch Phase**: Execute patching operations (optional)
+6. **Full Workflow**: Execute all phases sequentially
+
+### Architecture Layers
+
+- **Entry Point**: `main.py` - Application bootstrap and CLI handling
+- **Orchestration**: `WorkflowOrchestrator` - Coordinates 3-phase workflow
+- **Services**: Domain services for each phase (Scanner, AMIBackup, ServerManager)
+- **Infrastructure**: AWS clients, storage, and session management
+- **Models**: Data structures for instances, configurations, and results
+
+## Complete Flow Diagram
 
 ```mermaid
 flowchart TD
-    A[Start: main.py] --> B{Configuration Mode?}
+    %% Entry Point and Initialization
+    A[main.py] --> B{Configuration Source?}
     B -->|CLI Args| C[Parse CLI Arguments]
-    B -->|Config File| D[Load prepatch_config.yml]
-
-    C --> E[Initialize Services]
+    B -->|Config File| D[Load YAML Configuration]
+    C --> E[ConfigService: Validate Configuration]
     D --> E
+    E --> F[Initialize Core Services]
+    F --> G{Workflow Type?}
 
-    E --> F[ConfigService: Validate Configuration]
-    F --> G{Valid Config?}
-    G -->|No| H[Exit with Error]
-    G -->|Yes| I[Initialize AWS Session]
+    %% Service Initialization
+    F --> F1[AWSSessionManager: Initialize]
+    F1 --> F2[Assume Roles for Landing Zones]
+    F2 --> F3[Initialize AWS Clients: EC2, SSM, STS]
+    F3 --> F4[StorageService: Initialize]
+    F4 --> F5[ReportService: Initialize]
+    F5 --> G
 
-    I --> J[STS Client: Assume Roles]
-    J --> K{Role Assumption Success?}
-    K -->|No| L[Exit with Authentication Error]
-    K -->|Yes| M[Start Workflow Orchestrator]
+    %% Workflow Branching
+    G -->|scanner| O[SCANNER PHASE]
+    G -->|backup| P[BACKUP PHASE - Requires Scan Results]
+    G -->|server-manager| SM[SERVER MANAGER PHASE]
+    G -->|precheck| Q[PRECHECK PHASE]
+    G -->|patch| R[PATCH PHASE]
+    G -->|full| S[FULL WORKFLOW - 3 Phase]
+    G -->|Invalid| H[Error: Invalid Workflow Type]
 
-    M --> N{Workflow Phase?}
-    N -->|scan| O[SCAN PHASE]
-    N -->|backup| P[BACKUP PHASE]
-    N -->|precheck| Q[PRECHECK PHASE]
-    N -->|patch| R[PATCH PHASE]
-    N -->|full| S[ALL PHASES]
-
-    %% SCAN PHASE
+    %% SCANNER PHASE (Phase 1)
     O --> O1[ScannerService: Initialize]
-    O1 --> O2[For Each Landing Zone]
-    O2 --> O3[EC2Client: Describe Instances]
-    O3 --> O4[Filter by Tags/Criteria]
-    O4 --> O5[SSMClient: Get Instance Info]
-    O5 --> O6[ValidationService: Validate Instance]
-    O6 --> O7{More Landing Zones?}
-    O7 -->|Yes| O2
-    O7 -->|No| O8[Generate Scan Report]
-    O8 --> O9[StorageService: Save Results]
-    O9 --> END1[End: Scan Complete]
+    O1 --> O2[WorkflowOrchestrator: Start Scanner Phase]
+    O2 --> O3[For Each Landing Zone]
+    O3 --> O4[EC2Client: Describe Instances]
+    O4 --> O5[Apply Tag Filters and Criteria]
+    O5 --> O6[SSMClient: Get Instance Information]
+    O6 --> O7[Collect Instance Metadata]
+    O7 --> O8[ValidationService: Validate Instance]
+    O8 --> O9{More Landing Zones?}
+    O9 -->|Yes| O3
+    O9 -->|No| O10[Aggregate Discovery Results]
+    O10 --> O11[ReportService: Generate Multi-format Reports]
+    O11 --> O12[StorageService: Save CSV Results]
+    O12 --> END1[End: Scanner Complete]
 
-    %% BACKUP PHASE
+    %% AMI BACKUP PHASE (Phase 2)
     P --> P1[AMIBackupService: Initialize]
-    P1 --> P2[Load Scan Results]
-    P2 --> P3{Instances Found?}
+    P1 --> P2[Load Scanner Results from CSV]
+    P2 --> P3{Instances Found for Backup?}
     P3 -->|No| P4[Exit: No Instances to Backup]
-    P3 -->|Yes| P5[For Each Instance]
-    P5 --> P6[EC2Client: Create AMI]
-    P6 --> P7[Add Backup Tags]
-    P7 --> P8[Wait for AMI Creation]
-    P8 --> P9{AMI Ready?}
-    P9 -->|No| P10[Check Timeout]
-    P10 --> P11{Timeout Reached?}
-    P11 -->|Yes| P12[Mark as Failed]
-    P11 -->|No| P8
-    P9 -->|Yes| P13[Mark as Success]
-    P12 --> P14{More Instances?}
-    P13 --> P14
-    P14 -->|Yes| P5
-    P14 -->|No| P15[Generate Backup Report]
-    P15 --> P16[StorageService: Save Results]
-    P16 --> END2[End: Backup Complete]
+    P3 -->|Yes| P5[WorkflowOrchestrator: Start Backup Phase]
+    P5 --> P6[For Each Instance Running and Stopped]
+    P6 --> P7[EC2Client: Create AMI Backup]
+    P7 --> P8[Apply Backup Tags with Metadata]
+    P8 --> P9[Monitor AMI Creation Progress]
+    P9 --> P10{AMI Creation Complete?}
+    P10 -->|No| P11[Check Timeout Status]
+    P11 --> P12{Timeout Reached?}
+    P12 -->|Yes| P13[Mark as Failed - Timeout]
+    P12 -->|No| P9
+    P10 -->|Yes| P14[Verify AMI Success]
+    P14 --> P15[Mark as Success]
+    P13 --> P16{More Instances?}
+    P15 --> P16
+    P16 -->|Yes| P6
+    P16 -->|No| P17[Update CSV with Backup Status]
+    P17 --> P18[Generate Backup Report]
+    P18 --> P19[StorageService: Save Results]
+    P19 --> END2[End: AMI Backup Complete]
+
+    %% SERVER MANAGER PHASE (Phase 3)
+    SM --> SM1[ServerManagerService: Initialize]
+    SM1 --> SM2[Load Previous Phase Results]
+    SM2 --> SM3{Instances Found?}
+    SM3 -->|No| SM4[Exit: No Instances to Manage]
+    SM3 -->|Yes| SM5[WorkflowOrchestrator: Start Server Manager Phase]
+    SM5 --> SM6[For Each Instance]
+    SM6 --> SM7[Check Current Instance State]
+    SM7 --> SM8{Instance State?}
+    SM8 -->|Stopped| SM9[EC2Client: Start Instance]
+    SM8 -->|Running| SM10[Verify Instance Health]
+    SM8 -->|Other| SM11[Log State - No Action]
+    SM9 --> SM12[Wait for Instance Running]
+    SM12 --> SM13{Instance Started?}
+    SM13 -->|No| SM14[Mark as Failed to Start]
+    SM13 -->|Yes| SM15[Verify SSM Connectivity]
+    SM10 --> SM15
+    SM15 --> SM16[Update Instance Status]
+    SM11 --> SM16
+    SM14 --> SM16
+    SM16 --> SM17{More Instances?}
+    SM17 -->|Yes| SM6
+    SM17 -->|No| SM18[Update CSV with Current States]
+    SM18 --> SM19[Generate Server Manager Report]
+    SM19 --> SM20[StorageService: Save Results]
+    SM20 --> END_SM[End: Server Manager Complete]
 
     %% PRECHECK PHASE
     Q --> Q1[ServerManagerService: Initialize]
@@ -116,100 +170,179 @@ flowchart TD
     R18 --> R19[StorageService: Save Results]
     R19 --> END4[End: Patch Complete]
 
-    %% FULL WORKFLOW
-    S --> S1[Execute SCAN PHASE]
-    S1 --> S2{Scan Successful?}
-    S2 -->|No| S3[Exit with Scan Error]
-    S2 -->|Yes| S4[Execute BACKUP PHASE]
-    S4 --> S5{Backup Successful?}
-    S5 -->|No| S6[Exit with Backup Error]
-    S5 -->|Yes| S7[Execute PRECHECK PHASE]
-    S7 --> S8{Precheck Successful?}
-    S8 -->|No| S9[Exit with Precheck Error]
-    S8 -->|Yes| S10[Execute PATCH PHASE]
-    S10 --> S11[Generate Final Report]
-    S11 --> S12[ReportService: Create Multi-format Reports]
-    S12 --> S13[Generate CSV Report]
-    S13 --> S14[Generate JSON Report]
-    S14 --> S15[Generate HTML Dashboard]
-    S15 --> S16[Generate XML Report]
-    S16 --> END5[End: Full Workflow Complete]
+    %% FULL WORKFLOW (3-Phase Architecture)
+    S --> S1[WorkflowOrchestrator: Initialize 3-Phase Workflow]
+    S1 --> S2[Phase 1: Execute SCANNER PHASE]
+    S2 --> S3{Scanner Phase Successful?}
+    S3 -->|No| S4[Log Scanner Errors]
+    S4 --> S5[Generate Partial Report]
+    S5 --> ERR_EXIT[Exit with Scanner Error]
+    S3 -->|Yes| S6[Phase 2: Execute AMI BACKUP PHASE]
+    S6 --> S7{Backup Phase Successful?}
+    S7 -->|No| S8[Log Backup Errors]
+    S8 --> S9[Generate Partial Report with Scanner Data]
+    S9 --> ERR_EXIT2[Exit with Backup Error]
+    S7 -->|Yes| S10[Phase 3: Execute SERVER MANAGER PHASE]
+    S10 --> S11{Server Manager Phase Successful?}
+    S11 -->|No| S12[Log Server Manager Errors]
+    S12 --> S13[Generate Report with Available Data]
+    S13 --> ERR_EXIT3[Exit with Server Manager Error]
+    S11 -->|Yes| S14[All Phases Complete Successfully]
+    S14 --> S15[Aggregate All Phase Results]
+    S15 --> S16[ReportService: Create Comprehensive Reports]
+    S16 --> S17[Generate CSV Report with All Data]
+    S17 --> S18[Generate JSON Report with Metadata]
+    S18 --> S19[Generate HTML Dashboard]
+    S19 --> S20[Generate XML Report for Integration]
+    S20 --> S21[Generate Final Summary Report]
+    S21 --> END5[End: Full 3-Phase Workflow Complete]
 
-    %% Error Handling
-    H --> ERROR[Error Handling]
-    L --> ERROR
+    %% Error Handling and Recovery
+    H --> ERROR[Centralized Error Handling]
     P4 --> ERROR
+    SM4 --> ERROR
+    Q4 --> ERROR
     R4 --> ERROR
-    S3 --> ERROR
-    S6 --> ERROR
-    S9 --> ERROR
+    ERR_EXIT --> ERROR
+    ERR_EXIT2 --> ERROR
+    ERR_EXIT3 --> ERROR
 
-    ERROR --> ERR1[Log Error Details]
-    ERR1 --> ERR2[Generate Error Report]
-    ERR2 --> ERR3[Cleanup Resources]
-    ERR3 --> ERR4[Exit with Error Code]
+    ERROR --> ERR1[Log Detailed Error Information]
+    ERR1 --> ERR2[Capture Error Context and Stack Trace]
+    ERR2 --> ERR3[Generate Error Report with Diagnostics]
+    ERR3 --> ERR4[Cleanup AWS Resources and Sessions]
+    ERR4 --> ERR5[Save Partial Results if Available]
+    ERR5 --> ERR6[Exit with Appropriate Error Code]
+
+    %% Async Operations and Monitoring
+    O6 --> ASYNC1[Async: Concurrent Landing Zone Processing]
+    P9 --> ASYNC2[Async: Concurrent AMI Creation Monitoring]
+    SM12 --> ASYNC3[Async: Concurrent Instance State Management]
 
     %% Styling
     classDef phaseBox fill:#e1f5fe,stroke:#01579b,stroke-width:2px
     classDef serviceBox fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef orchestratorBox fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
     classDef decisionBox fill:#fff3e0,stroke:#e65100,stroke-width:2px
     classDef errorBox fill:#ffebee,stroke:#b71c1c,stroke-width:2px
-    classDef endBox fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
+    classDef endBox fill:#c8e6c9,stroke:#1b5e20,stroke-width:2px
+    classDef asyncBox fill:#f1f8e9,stroke:#33691e,stroke-width:2px
 
-    class O,P,Q,R,S phaseBox
-    class O1,P1,Q1,R1,S12 serviceBox
-    class B,G,K,N,P3,Q5,Q12,R3,R9,R14,S2,S5,S8 decisionBox
-    class H,L,ERROR,ERR1,ERR2,ERR3,ERR4 errorBox
-    class END1,END2,END3,END4,END5 endBox
+    %% Phase Classifications
+    class O,P,SM,Q,R,S phaseBox
+    class O1,O2,P1,P5,SM1,SM5,Q1,R1,S1 orchestratorBox
+    class O1,P1,SM1,Q1,R1,S16 serviceBox
+    class B,G,P3,SM3,SM8,SM13,Q5,Q12,R3,R9,R14,S3,S7,S11 decisionBox
+    class H,ERROR,ERR1,ERR2,ERR3,ERR4,ERR5,ERR6,ERR_EXIT,ERR_EXIT2,ERR_EXIT3 errorBox
+    class END1,END2,END_SM,END3,END4,END5 endBox
+    class ASYNC1,ASYNC2,ASYNC3 asyncBox
 ```
 
 ## Phase Details
 
-### 1. Initialization Phase
+### Core 3-Phase Architecture
 
-- **Configuration Loading**: Parse CLI arguments or load YAML configuration
-- **Service Initialization**: Initialize all core services and AWS clients
-- **Authentication**: Assume AWS roles for each landing zone
-- **Validation**: Validate configuration and connectivity
+The CMS Patching Tool implements a streamlined 3-phase workflow designed for pre-patch preparation:
 
-### 2. Scan Phase
+### Phase 1: Scanner Phase
 
-- **Instance Discovery**: Query EC2 instances across all landing zones
-- **Filtering**: Apply tag-based and criteria-based filtering
-- **Information Gathering**: Collect instance metadata via SSM
-- **Validation**: Validate instance eligibility for patching
-- **Reporting**: Generate scan results in multiple formats
+**Purpose**: Discover and inventory EC2 instances across multiple landing zones
 
-### 3. Backup Phase
+**Key Operations**:
 
-- **AMI Creation**: Create AMI backups for all eligible instances
-- **Tagging**: Apply consistent tagging for backup tracking
-- **Monitoring**: Monitor AMI creation progress with timeout handling
-- **Verification**: Verify AMI creation success
-- **Reporting**: Generate backup status reports
+- **Instance Discovery**: Query EC2 instances across all configured landing zones
+- **Concurrent Processing**: Async processing of multiple landing zones simultaneously
+- **Tag-based Filtering**: Apply sophisticated tag-based and criteria filtering
+- **Metadata Collection**: Gather comprehensive instance metadata via SSM
+- **Platform Detection**: Identify Windows/Linux platforms and versions
+- **SSM Agent Status**: Verify SSM agent connectivity and status
+- **Validation**: Validate instance eligibility for patching operations
+- **Multi-format Reporting**: Generate CSV, JSON, HTML, and XML reports
 
-### 4. Precheck Phase
+**Outputs**:
 
-- **Connectivity Testing**: Verify SSM connectivity to instances
-- **System Checks**: Validate disk space, system load, and critical services
-- **Readiness Assessment**: Determine patch readiness for each instance
-- **Risk Assessment**: Identify potential patching risks
-- **Reporting**: Generate precheck results and recommendations
+- Primary CSV file with instance inventory
+- JSON metadata for API integration
+- HTML dashboard for visual review
+- XML reports for enterprise integration
 
-### 5. Patch Phase
+### Phase 2: AMI Backup Phase
 
-- **Patch Execution**: Execute patching commands via SSM
-- **Progress Monitoring**: Monitor patch progress with timeout handling
-- **Verification**: Verify patch installation success
-- **Status Tracking**: Track success, failure, and partial success states
-- **Reporting**: Generate comprehensive patch results
+**Purpose**: Create comprehensive AMI backups for all discovered instances
 
-### 6. Reporting Phase
+**Key Operations**:
 
-- **Multi-format Output**: Generate CSV, JSON, HTML, and XML reports
-- **Dashboard Creation**: Create interactive HTML dashboard
-- **Data Aggregation**: Aggregate results across all phases
-- **Compliance Reporting**: Generate compliance and audit reports
+- **Universal Backup**: Create AMI backups for both running and stopped instances
+- **Concurrent Operations**: Async AMI creation with configurable concurrency limits
+- **Intelligent Tagging**: Apply consistent backup tags with metadata (timestamp, source, retention)
+- **Progress Monitoring**: Real-time monitoring of AMI creation with timeout handling
+- **Status Tracking**: Track success, failure, and timeout states for each backup
+- **CSV Integration**: Update existing CSV with backup status and AMI IDs
+- **Retry Logic**: Implement retry mechanisms for failed backup operations
+
+**Outputs**:
+
+- Updated CSV with AMI backup information
+- Backup status reports with success/failure details
+- AMI inventory for rollback operations
+
+### Phase 3: Server Manager Phase
+
+**Purpose**: Manage instance states and prepare instances for patching operations
+
+**Key Operations**:
+
+- **State Assessment**: Evaluate current instance states (running, stopped, pending, etc.)
+- **Intelligent Starting**: Start stopped instances that require patching
+- **Health Verification**: Verify instance health and SSM connectivity after state changes
+- **Concurrent Management**: Async instance state management with configurable limits
+- **Status Tracking**: Track state change success/failure for each instance
+- **CSV Updates**: Update CSV with current instance states and readiness status
+- **Connectivity Validation**: Ensure SSM connectivity for patch-ready instances
+
+**Outputs**:
+
+- Final CSV with complete instance readiness status
+- Server management reports with state change details
+- Instance readiness summary for patching operations
+
+### Optional Extended Phases
+
+### 4. Precheck Phase (Optional)
+
+**Purpose**: Advanced validation and readiness assessment for patching
+
+**Key Operations**:
+
+- **Deep Connectivity Testing**: Comprehensive SSM connectivity validation
+- **System Health Checks**: Validate disk space, memory, CPU load, and critical services
+- **Patch Readiness Assessment**: Determine specific patch readiness for each instance
+- **Risk Assessment**: Identify potential patching risks and dependencies
+- **Compliance Validation**: Verify compliance requirements and constraints
+
+### 5. Patch Phase (Optional)
+
+**Purpose**: Execute actual patching operations with comprehensive monitoring
+
+**Key Operations**:
+
+- **Patch Execution**: Execute patching commands via SSM with progress tracking
+- **Real-time Monitoring**: Monitor patch progress with configurable timeout handling
+- **Success Verification**: Verify patch installation success and system stability
+- **Rollback Capability**: Automated rollback using previously created AMI backups
+- **Status Classification**: Track success, failure, partial success, and rollback states
+
+### 6. Comprehensive Reporting
+
+**Purpose**: Generate detailed reports across all executed phases
+
+**Key Features**:
+
+- **Multi-format Output**: CSV, JSON, HTML dashboard, and XML reports
+- **Interactive Dashboards**: HTML dashboards with drill-down capabilities
+- **Data Aggregation**: Comprehensive aggregation across all phases
+- **Audit Trail**: Complete audit trail for compliance and review
+- **Integration Ready**: API-friendly JSON and XML formats for external systems
 
 ## Error Handling
 
@@ -263,32 +396,116 @@ landing_zones:
 
 ## Usage Examples
 
-### Full Workflow
+### Core 3-Phase Workflow
 
 ```bash
-python main.py --landing-zones inventory/prod_landing_zones.yml --workflow full
+# Complete 3-phase workflow (Scanner → AMI Backup → Server Manager)
+python3 main.py --landing-zones lz250nonprod
+python3 main.py --landing-zones lz250nonprod,cmsnonprod
+python3 main.py --landing-zones lz250nonprod,cmsnonprod,fotoolsnonprod
 ```
 
-### Individual Phases
+### Individual Phase Execution
 
 ```bash
-# Scan only
-python main.py --landing-zones inventory/prod_landing_zones.yml --workflow scan
+# Phase 1: Scanner only - Quick instance discovery
+python3 main.py --scanner-only --landing-zones lz250nonprod
+python3 main.py --scanner-only --landing-zones lz250nonprod,cmsnonprod
 
-# Backup only (requires previous scan)
-python main.py --landing-zones inventory/prod_landing_zones.yml --workflow backup
+# Phase 2: AMI Backup only (requires previous scanner results)
+python3 main.py --workflow backup --landing-zones lz250nonprod
 
-# Precheck only (requires previous scan)
-python main.py --landing-zones inventory/prod_landing_zones.yml --workflow precheck
-
-# Patch only (requires previous precheck)
-python main.py --landing-zones inventory/prod_landing_zones.yml --workflow patch
+# Phase 3: Server Manager only (requires previous results)
+python3 main.py --workflow server-manager --landing-zones lz250nonprod
 ```
 
-### Configuration-Driven Workflow
+### Advanced Configuration Options
 
 ```bash
-python main.py --config config/prepatch_config.yml
+# Custom configuration file
+python3 main.py --config config/prepatch_config.yml --landing-zones lz250nonprod
+
+# Custom output directory
+python3 main.py --landing-zones lz250nonprod --output-dir custom_reports/
+
+# Verbose logging for debugging
+python3 main.py --landing-zones lz250nonprod --verbose
+
+# Environment-specific execution
+python3 main.py --landing-zones lz250nonprod --environment nonprod
 ```
 
-This flow diagram provides a complete overview of the patching workflow, showing all decision points, error handling, and the interaction between different services and phases.
+### Extended Workflow (Optional Phases)
+
+```bash
+# Full workflow including optional precheck and patch phases
+python3 main.py --workflow full --landing-zones lz250nonprod
+
+# Precheck only (requires previous scanner results)
+python3 main.py --workflow precheck --landing-zones lz250nonprod
+
+# Patch only (requires previous precheck results)
+python3 main.py --workflow patch --landing-zones lz250nonprod
+```
+
+### Multi-Environment Execution
+
+```bash
+# Production environments
+python3 main.py --landing-zones lz250prod,cmsprod --environment prod
+
+# Non-production environments
+python3 main.py --landing-zones lz250nonprod,cmsnonprod,fotoolsnonprod --environment nonprod
+
+# Development environments
+python3 main.py --landing-zones lz250dev,cmsdev --environment dev
+```
+
+## Key Architecture Benefits
+
+### Clean Architecture Implementation
+
+- **Separation of Concerns**: Clear boundaries between entry point, orchestration, services, and infrastructure
+- **Dependency Inversion**: Services depend on abstractions, not concrete implementations
+- **Single Responsibility**: Each service has a focused, well-defined purpose
+- **Testability**: Modular design enables comprehensive unit and integration testing
+
+### Streamlined 3-Phase Workflow
+
+- **Simplified Operations**: Focused on essential pre-patch preparation tasks
+- **Sequential Execution**: Each phase builds upon the previous phase's results
+- **Graceful Degradation**: Partial results available even if later phases fail
+- **CSV-Driven**: Consistent CSV-based data flow between phases
+
+### Performance and Scalability
+
+- **Asynchronous Operations**: Concurrent processing across landing zones and instances
+- **Configurable Concurrency**: Tunable limits for optimal performance
+- **Resource Management**: Efficient AWS session and resource management
+- **Timeout Handling**: Robust timeout mechanisms prevent hanging operations
+
+### Comprehensive Reporting
+
+- **Multi-format Output**: CSV, JSON, HTML, and XML reports for different use cases
+- **Interactive Dashboards**: HTML dashboards with drill-down capabilities
+- **Audit Trail**: Complete tracking of all operations and decisions
+- **Integration Ready**: API-friendly formats for external system integration
+
+### Error Handling and Reliability
+
+- **Centralized Error Management**: Consistent error handling across all phases
+- **Partial Success Handling**: Continue operations even when individual instances fail
+- **Detailed Logging**: Comprehensive logging with context and stack traces
+- **Resource Cleanup**: Automatic cleanup of AWS resources on failures
+
+## Summary
+
+This comprehensive flow diagram illustrates the complete CMS Patching Tool workflow, showcasing:
+
+1. **Modern Architecture**: Clean architecture principles with clear layer separation
+2. **Streamlined Process**: Focused 3-phase workflow for efficient pre-patch preparation
+3. **Robust Operations**: Comprehensive error handling, async processing, and timeout management
+4. **Flexible Execution**: Support for individual phases, custom configurations, and multi-environment operations
+5. **Enterprise Integration**: Multi-format reporting and API-ready outputs
+
+The workflow provides a solid foundation for automated patch preparation while maintaining flexibility for various operational scenarios and integration requirements.

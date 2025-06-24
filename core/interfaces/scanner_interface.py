@@ -3,49 +3,48 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 from core.models.instance import Instance
-from core.models.landing_zone import LandingZone
-from core.models.scan_result import ScanResult
+from core.models.config import LandingZoneConfig
 
 
 class IScannerService(ABC):
     """Interface for scanning and discovering EC2 instances."""
     
     @abstractmethod
-    async def scan_landing_zone(self, landing_zone: LandingZone, 
-                               platform_filter: Optional[str] = None) -> ScanResult:
+    async def scan_landing_zone(self, landing_zone_config: LandingZoneConfig, 
+                               platform_filter: Optional[str] = None) -> List[Instance]:
         """Scan a specific landing zone for instances.
         
         Args:
-            landing_zone: The landing zone to scan
+            landing_zone_config: The landing zone configuration to scan
             platform_filter: Optional platform filter ('windows', 'linux')
             
         Returns:
-            ScanResult containing discovered instances and metadata
+            List of discovered instances
         """
         pass
     
     @abstractmethod
-    async def scan_multiple_landing_zones(self, landing_zones: List[LandingZone],
-                                         platform_filter: Optional[str] = None) -> List[ScanResult]:
+    async def scan_multiple_landing_zones(self, landing_zone_configs: List[LandingZoneConfig],
+                                         platform_filter: Optional[str] = None) -> Dict[str, List[Instance]]:
         """Scan multiple landing zones concurrently.
         
         Args:
-            landing_zones: List of landing zones to scan
+            landing_zone_configs: List of landing zone configurations to scan
             platform_filter: Optional platform filter
             
         Returns:
-            List of ScanResult objects
+            Dictionary mapping landing zone names to lists of instances
         """
         pass
     
     @abstractmethod
     async def get_instance_details(self, instance_id: str, 
-                                  landing_zone: LandingZone) -> Optional[Instance]:
+                                  landing_zone_config: LandingZoneConfig) -> Optional[Instance]:
         """Get detailed information for a specific instance.
         
         Args:
             instance_id: The EC2 instance ID
-            landing_zone: The landing zone containing the instance
+            landing_zone_config: The landing zone configuration containing the instance
             
         Returns:
             Instance object with detailed information or None if not found

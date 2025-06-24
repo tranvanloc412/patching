@@ -16,19 +16,12 @@ from typing import List, Optional
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.services import (
-    ConfigService,
-    WorkflowOrchestrator,
-    ScannerService,
-    AMIBackupService,
-    ServerManagerService,
-    ValidationService,
-    ReportService,
-    StorageService
-)
+from core.services.config_service import ConfigService
+from core.orchestration.workflow_orchestrator import WorkflowOrchestrator
+from core.services.scanner_service import ScannerService
 from core.models.config import Environment, LogLevel
-from infrastructure.aws import AWSSessionManager
-from infrastructure.storage import FileStorage
+from infrastructure.aws.session_manager import AWSSessionManager
+from infrastructure.storage.file_storage import FileStorage
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -63,33 +56,27 @@ async def run_workflow(
         config_service = ConfigService()
         await config_service.load_config(config_path)
         
-        # Get environment config
-        env_config = config_service.get_environment_config(Environment(environment))
-        if not env_config:
-            logger.error(f"Environment '{environment}' not found in configuration")
+        # Get workflow config
+        workflow_config = config_service.get_workflow_config()
+        if not workflow_config:
+            logger.error("Workflow configuration not found")
             return False
         
         # Initialize AWS session manager
         session_manager = AWSSessionManager(
-            default_region=env_config.aws.region,
-            role_name=env_config.aws.role_name
+            default_region=workflow_config.aws.region,
+            role_name=workflow_config.aws.role_name
         )
-        
-        # Initialize storage
-        file_storage = FileStorage()
-        storage_service = StorageService(file_storage)
         
         # Initialize workflow orchestrator
         orchestrator = WorkflowOrchestrator(
             config_service=config_service,
-            session_manager=session_manager,
-            storage_service=storage_service
+            session_manager=session_manager
         )
         
         # Run workflow
-        workflow_result = await orchestrator.run_workflow(
+        workflow_result = await orchestrator.run_prepatch_workflow(
             landing_zones=landing_zones,
-            environment=Environment(environment),
             skip_phases=skip_phases or []
         )
         
@@ -127,18 +114,15 @@ async def run_scanner_only(
         config_service = ConfigService()
         await config_service.load_config(config_path)
         
-        env_config = config_service.get_environment_config(Environment(environment))
-        if not env_config:
-            logger.error(f"Environment '{environment}' not found in configuration")
+        workflow_config = config_service.get_workflow_config()
+        if not workflow_config:
+            logger.error("Workflow configuration not found")
             return False
         
         session_manager = AWSSessionManager(
-            default_region=env_config.aws.region,
-            role_name=env_config.aws.role_name
+            default_region=workflow_config.aws.region,
+            role_name=workflow_config.aws.role_name
         )
-        
-        file_storage = FileStorage()
-        storage_service = StorageService(file_storage)
         
         scanner_service = ScannerService(
             config_service=config_service,
@@ -146,17 +130,18 @@ async def run_scanner_only(
         )
         
         # Run scanner
-        instances = await scanner_service.scan_landing_zones(
-            landing_zones=landing_zones,
-            environment=Environment(environment)
-        )
+        instances = await scanner_service.scan_landing_zones(landing_zones)
         
         # Save results
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_path = f"reports/scan_results_{timestamp}.csv"
         
-        await storage_service.save_instances_csv(instances, csv_path)
+        file_storage = FileStorage()
+        await file_storage.write_file(csv_path, "instance_id,name,state,platform\n")
+        for instance in instances:
+            line = f"{instance.instance_id},{instance.name},{instance.status.value},{instance.platform.value}\n"
+            await file_storage.append_file(csv_path, line)
         
         logger.info(f"Scanner completed. Found {len(instances)} instances")
         logger.info(f"Results saved to: {csv_path}")
